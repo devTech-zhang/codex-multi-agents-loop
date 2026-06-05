@@ -1,0 +1,256 @@
+{
+  "id": "delivery-workflow",
+  "name": "通用软件交付流程",
+  "version": "1.0.0",
+  "steps": [
+    {
+      "id": "requirement-intake",
+      "name": "需求录入 Gate",
+      "category": "interactive",
+      "executor": "gate",
+      "ref": "references/01-requirement-intake.md",
+      "gate": {
+        "kind": "input",
+        "schema": {
+          "project_name": {"type": "string", "required": true},
+          "requirement_summary": {"type": "string", "required": true},
+          "business_goal": {"type": "string", "required": true},
+          "requires_frontend": {"type": "boolean", "required": true},
+          "requires_backend": {"type": "boolean", "required": true}
+        }
+      },
+      "next": {"default": "prd-v1"}
+    },
+    {
+      "id": "prd-v1",
+      "name": "生成 PRD v1",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "product_manager",
+      "artifact_category": "prd",
+      "ref": "references/02-prd-v1.md",
+      "inputs": ["raw_requirement", "project_context", "requirement-intake_gate"],
+      "outputs": ["prd_v1"],
+      "next": {"default": "prd-validation"}
+    },
+    {
+      "id": "prd-validation",
+      "name": "PRD 确定性校验",
+      "category": "automated",
+      "executor": "validator",
+      "requires": ["prd_v1"],
+      "outputs": ["prd_validation"],
+      "next": {"default": "multi-role-review", "failed": "prd-v1"}
+    },
+    {
+      "id": "multi-role-review",
+      "name": "多角色需求评审",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "review_board",
+      "artifact_category": "review",
+      "ref": "references/03-multi-role-review.md",
+      "inputs": ["prd_v1"],
+      "outputs": ["requirement_review_report"],
+      "next": {"default": "review-summary"}
+    },
+    {
+      "id": "review-summary",
+      "name": "评审意见汇总与 PRD v2",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "product_manager",
+      "artifact_category": "prd",
+      "ref": "references/04-review-summary.md",
+      "inputs": ["prd_v1", "requirement_review_report"],
+      "outputs": ["prd_v2"],
+      "next": {"default": "prd-approval"}
+    },
+    {
+      "id": "prd-approval",
+      "name": "PRD 审批 Gate",
+      "category": "interactive",
+      "executor": "gate",
+      "ref": "references/05-prd-approval.md",
+      "gate": {
+        "kind": "approval",
+        "schema": {
+          "approved": {"type": "boolean", "required": true},
+          "approver": {"type": "string", "required": true},
+          "comment": {"type": "string", "required": false}
+        },
+        "actions": ["approve", "reject"]
+      },
+      "next": {"approved": "ui-design-spec", "rejected": "prd-v1"}
+    },
+    {
+      "id": "ui-design-spec",
+      "name": "UI 设计规范",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "ui_designer",
+      "artifact_category": "ui",
+      "ref": "references/06-ui-design-spec.md",
+      "inputs": ["prd_v2"],
+      "outputs": ["ui_design_spec"],
+      "next": {"default": "ui-high-fidelity-design"}
+    },
+    {
+      "id": "ui-high-fidelity-design",
+      "name": "Figma 高保真设计任务",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "ui_designer",
+      "artifact_category": "ui",
+      "ref": "references/07-ui-high-fidelity-design.md",
+      "inputs": ["prd_v2", "ui_design_spec"],
+      "outputs": ["figma_design_task"],
+      "next": {"default": "frontend-tech-design"}
+    },
+    {
+      "id": "frontend-tech-design",
+      "name": "前端技术方案",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "frontend_engineer",
+      "artifact_category": "tech",
+      "ref": "references/08-frontend-tech-design.md",
+      "inputs": ["prd_v2", "ui_design_spec", "figma_design_task"],
+      "outputs": ["frontend_tech_design"],
+      "next": {"default": "backend-tech-design"}
+    },
+    {
+      "id": "backend-tech-design",
+      "name": "后端技术方案",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "backend_engineer",
+      "artifact_category": "tech",
+      "ref": "references/09-backend-tech-design.md",
+      "inputs": ["prd_v2"],
+      "outputs": ["backend_tech_design"],
+      "next": {"default": "tech-review"}
+    },
+    {
+      "id": "tech-review",
+      "name": "技术方案评审",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "tech_review_board",
+      "artifact_category": "tech",
+      "ref": "references/10-tech-review.md",
+      "inputs": ["frontend_tech_design", "backend_tech_design"],
+      "outputs": ["tech_review_report"],
+      "next": {"default": "dev-task-breakdown"}
+    },
+    {
+      "id": "dev-task-breakdown",
+      "name": "开发任务拆解",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "delivery_manager",
+      "artifact_category": "dev",
+      "ref": "references/11-dev-task-breakdown.md",
+      "inputs": ["prd_v2", "frontend_tech_design", "backend_tech_design", "tech_review_report"],
+      "outputs": ["dev_tasks"],
+      "next": {"default": "development-prepare"}
+    },
+    {
+      "id": "development-prepare",
+      "name": "开发前确定性准备",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/12-development-prepare.md",
+      "inputs": ["dev_tasks"],
+      "outputs": ["development_prepare_result"],
+      "next": {"default": "frontend-development"}
+    },
+    {
+      "id": "frontend-development",
+      "name": "前端开发执行",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/13-frontend-development.md",
+      "inputs": ["dev_tasks", "frontend_tech_design", "ui_design_spec"],
+      "outputs": ["frontend_dev_result"],
+      "next": {"default": "backend-development"}
+    },
+    {
+      "id": "backend-development",
+      "name": "后端开发执行",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/14-backend-development.md",
+      "inputs": ["dev_tasks", "backend_tech_design"],
+      "outputs": ["backend_dev_result"],
+      "next": {"default": "test-case-design"}
+    },
+    {
+      "id": "test-case-design",
+      "name": "测试用例设计",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "qa_engineer",
+      "artifact_category": "test",
+      "ref": "references/15-test-case-design.md",
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result"],
+      "outputs": ["test_cases"],
+      "next": {"default": "regression-testing"}
+    },
+    {
+      "id": "regression-testing",
+      "name": "回归测试执行",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/16-regression-testing.md",
+      "inputs": ["test_cases", "frontend_dev_result", "backend_dev_result"],
+      "outputs": ["test_report"],
+      "next": {"default": "release-approval"}
+    },
+    {
+      "id": "release-approval",
+      "name": "上线审批 Gate",
+      "category": "interactive",
+      "executor": "gate",
+      "ref": "references/17-release-approval.md",
+      "gate": {
+        "kind": "approval",
+        "schema": {
+          "approved": {"type": "boolean", "required": true},
+          "approver": {"type": "string", "required": true},
+          "comment": {"type": "string", "required": false}
+        },
+        "actions": ["approve", "reject"]
+      },
+      "next": {"approved": "final-report", "rejected": "regression-testing"}
+    },
+    {
+      "id": "final-report",
+      "name": "最终交付报告",
+      "category": "automated",
+      "executor": "agent",
+      "agent": "delivery_manager",
+      "artifact_category": "release",
+      "ref": "references/18-final-report.md",
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "test_report", "release-approval_gate"],
+      "outputs": ["final_delivery_report"],
+      "next": {"default": "publish-final-report-doc"}
+    },
+    {
+      "id": "publish-final-report-doc",
+      "name": "发布飞书最终报告文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "final_delivery_report",
+      "next": {"default": "delivery-notification"}
+    },
+    {
+      "id": "delivery-notification",
+      "name": "交付完成通知",
+      "category": "notification",
+      "executor": "notify",
+      "message": "软件交付 workflow 已完成，最终报告已发布。",
+      "next": {}
+    }
+  ]
+}

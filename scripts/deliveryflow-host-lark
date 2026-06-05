@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import sys
+import os
+from pathlib import Path
+
+WORKSPACE_ROOT = Path(__file__).resolve().parents[1]
+VENV_PYTHON = WORKSPACE_ROOT / ".venv" / "bin" / "python"
+if VENV_PYTHON.exists() and os.environ.get("VIRTUAL_ENV") != str(WORKSPACE_ROOT / ".venv"):
+    env = os.environ.copy()
+    env["VIRTUAL_ENV"] = str(WORKSPACE_ROOT / ".venv")
+    env["PATH"] = f"{WORKSPACE_ROOT / '.venv' / 'bin'}:{env.get('PATH', '')}"
+    os.execve(str(VENV_PYTHON), [str(VENV_PYTHON), __file__, *sys.argv[1:]], env)
+sys.path.insert(0, str(WORKSPACE_ROOT))
+
+from delivery_workflow.cli import main
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="deliveryflow-host-lark")
+    sub = parser.add_subparsers(dest="command", required=True)
+    retry = sub.add_parser("retry-prd-approval")
+    retry.add_argument("--workspace", required=True)
+    retry.add_argument("--run-id", required=True)
+    return parser.parse_args()
+
+
+def _workspace_root() -> Path:
+    return WORKSPACE_ROOT
+
+
+def run() -> int:
+    args = _parse_args()
+    if args.command == "retry-prd-approval":
+        # Keep this host runner intentionally narrow so Codex can persistently
+        # approve only the Lark PRD approval sender, not arbitrary Python.
+        import os
+
+        os.chdir(args.workspace)
+        return main(["lark", "retry-prd-approval", "--run-id", args.run_id])
+    raise AssertionError(f"unsupported command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

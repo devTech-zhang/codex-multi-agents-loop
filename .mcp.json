@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "delivery-workflow": {
+      "command": "./scripts/deliveryflow-mcp",
+      "args": [
+      ]
+    }
+  }
+}

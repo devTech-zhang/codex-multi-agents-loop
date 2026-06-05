@@ -1,0 +1,57 @@
+{
+    "storage": {
+        "home": ".delivery-workflow",
+        "db": ".delivery-workflow/delivery.db",
+        "artifact_root": "delivery-projects"
+    },
+    "workflow": {
+        "auto_start": true,
+        "auto_run_to_gate": true
+    },
+    "code_platforms": {
+        "default": "codex",
+        "frontend": "codex",
+        "backend": "codex",
+        "other": "codex",
+        "enable_agent_cli": false,
+        "executors": {
+            "codex": {
+                "binary_candidates": ["codex"],
+                "command": ["{binary}", "exec", "--file", "{prompt_path}"]
+            },
+            "claude-code": {
+                "binary_candidates": ["claude"],
+                "command": ["{binary}", "-p"],
+                "stdin_from_prompt": true
+            },
+            "opencode": {
+                "binary_candidates": ["opencode"],
+                "command": ["{binary}", "run", "--file", "{prompt_path}"]
+            }
+        }
+    },
+    "lark": {
+        "enabled": true,
+        "identity": "bot",
+        "chat_id": "oc_be876ab84ee0944e5dd8e837f3934b75",
+        "dry_run": false,
+        "send_step_notifications": true,
+        "send_prd_approval_card": true,
+        "create_prd_doc_without_chat": true,
+        "prd_doc_title_template": "{project_title}PRD",
+        "sender": {
+            "mode": "current_process",
+            "on_keychain_error": "host_escalation"
+        },
+        "sdk": {
+            "credential_source": "lark-cli",
+            "profile": "",
+            "app_id": "cli_aa8c697391a41bd0",
+            "app_secret": "8tgeWc1PIHI1KjHXUG5QehGS6wCUUyhz",
+            "log_level": "info"
+        },
+        "event": {
+            "transport": "sdk_websocket"
+        }
+    }
+}

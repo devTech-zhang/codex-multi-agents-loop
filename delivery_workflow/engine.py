@@ -1,0 +1,933 @@
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import shutil
+from pathlib import Path
+from typing import Any
+
+from .capabilities import lark_doc_capability
+from .config import code_platform_for_step, lark_chat_id as config_lark_chat_id, lark_config, lark_dry_run as config_lark_dry_run, lark_enabled, lark_identity, load_config
+from .definitions import WorkflowDefinition, list_workflows, load_workflow
+from .lark import create_doc_as_bot, extract_doc_url, lark_available, send_approval_card_as_bot, send_text_as_bot
+from .paths import DEFAULT_WORKFLOW_ID, PLUGIN_ROOT, artifact_root
+from .platforms import build_agent_command, maybe_run_command, select_dev_executor
+from .storage import connect, new_id, now_iso, row_dict, row_dicts
+
+
+class WorkflowError(RuntimeError):
+    pass
+
+
+def create_project(
+    *,
+    requirement: str,
+    title: str | None = None,
+    platform: str | None = None,
+    owner_id: str | None = None,
+    source: str = "codex",
+    workflow_id: str = DEFAULT_WORKFLOW_ID,
+    auto_start: bool | None = None,
+    auto_run_to_gate: bool | None = None,
+    business_goal: str | None = None,
+    requires_frontend: bool = True,
+    requires_backend: bool = True,
+    lark_chat_id: str | None = None,
+) -> dict[str, Any]:
+    config = load_config()
+    platform = code_platform_for_step(config, fallback=platform)
+    if lark_chat_id is None:
+        lark_chat_id = config_lark_chat_id(config)
+    workflow_config = config.get("workflow") or {}
+    if auto_start is None:
+        auto_start = bool(workflow_config.get("auto_start", True))
+    if auto_run_to_gate is None:
+        auto_run_to_gate = bool(workflow_config.get("auto_run_to_gate", True))
+    requirement = requirement.strip()
+    if not requirement:
+        raise WorkflowError("requirement cannot be empty")
+    definition = load_workflow(workflow_id)
+    ts = now_iso()
+    project_title = title or requirement[:40]
+    project_id = _new_project_id(project_title)
+    run_id = new_id("run")
+    start_step = "prd-v1"
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO projects(id,title,requirement,platform,source,owner_id,lark_chat_id,status,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            """,
+            (project_id, project_title, requirement, platform, source, owner_id, lark_chat_id, "created", ts, ts),
+        )
+        conn.execute(
+            """
+            INSERT INTO workflow_runs(id,project_id,workflow_id,current_step,status,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (run_id, project_id, workflow_id, start_step, "running", ts, ts),
+        )
+    write_artifact(run_id, "raw_requirement", requirement, category="raw", created_by="workflow")
+    write_artifact(
+        run_id,
+        "project_context",
+        json.dumps(
+            {
+                "project_id": project_id,
+                "run_id": run_id,
+                "platform": platform,
+                "dev_executor": select_dev_executor(platform),
+                "code_platforms": config.get("code_platforms", {}),
+                "workflow_id": workflow_id,
+                "lark_chat_id": lark_chat_id,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        category="context",
+        created_by="workflow",
+    )
+    write_artifact(
+        run_id,
+        "requirement-intake_gate",
+        json.dumps(
+            {
+                "project_name": project_title,
+                "requirement_summary": requirement,
+                "business_goal": business_goal or "待进一步明确业务目标",
+                "requires_frontend": requires_frontend,
+                "requires_backend": requires_backend,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        category="gate",
+        created_by="workflow",
+    )
+    emit_event(
+        run_id,
+        "workflow.started",
+        "项目已创建，Worker 自动启动并进入 PRD v1 流程。",
+        {"project_id": project_id, "start_step": start_step},
+    )
+    if auto_start:
+        enqueue_step(run_id, start_step)
+    auto_run_result = None
+    if auto_start and auto_run_to_gate:
+        auto_run_result = run_worker_until_blocked(run_id=run_id, stop_steps={"prd-approval"}, max_jobs=20)
+    result = {
+        "project_id": project_id,
+        "run_id": run_id,
+        "workflow_id": workflow_id,
+        "artifact_dir": str(artifact_root() / project_id),
+    }
+    if auto_run_result is not None:
+        result["auto_run"] = auto_run_result
+    return result
+
+
+def get_run(run_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        run = row_dict(conn.execute("SELECT * FROM workflow_runs WHERE id = ?", (run_id,)).fetchone())
+        if not run:
+            raise WorkflowError(f"workflow run not found: {run_id}")
+        project = row_dict(conn.execute("SELECT * FROM projects WHERE id = ?", (run["project_id"],)).fetchone())
+    run["project"] = project
+    return run
+
+
+def list_projects(limit: int = 20) -> list[dict[str, Any]]:
+    with connect() as conn:
+        return row_dicts(conn.execute("SELECT * FROM projects ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall())
+
+
+def get_project_status(project_id: str) -> dict[str, Any]:
+    with connect() as conn:
+        run = row_dict(
+            conn.execute(
+                "SELECT * FROM workflow_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
+                (project_id,),
+            ).fetchone()
+        )
+    if not run:
+        raise WorkflowError(f"project not found or has no workflow run: {project_id}")
+    return status(run["id"])
+
+
+def delete_project(project_id: str, *, confirm_project_id: str, delete_artifacts: bool = True) -> dict[str, Any]:
+    if not project_id or project_id != confirm_project_id:
+        raise WorkflowError("confirm_project_id must exactly match project_id")
+    with connect() as conn:
+        project = row_dict(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
+        if not project:
+            raise WorkflowError(f"project not found: {project_id}")
+        run_rows = conn.execute("SELECT id FROM workflow_runs WHERE project_id = ?", (project_id,)).fetchall()
+        run_ids = [row["id"] for row in run_rows]
+        for run_id in run_ids:
+            conn.execute("DELETE FROM events WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM gates WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM artifacts WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM jobs WHERE run_id = ?", (run_id,))
+            conn.execute("DELETE FROM step_runs WHERE run_id = ?", (run_id,))
+        conn.execute("DELETE FROM workflow_runs WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    artifact_dir = artifact_root() / project_id
+    artifacts_deleted = False
+    if delete_artifacts and artifact_dir.exists():
+        shutil.rmtree(artifact_dir)
+        artifacts_deleted = True
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "deleted_runs": run_ids,
+        "artifact_dir": str(artifact_dir),
+        "artifacts_deleted": artifacts_deleted,
+    }
+
+
+def list_jobs(run_id: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if run_id:
+        clauses.append("run_id = ?")
+        params.append(run_id)
+    if status:
+        clauses.append("status = ?")
+        params.append(status)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    with connect() as conn:
+        return row_dicts(
+            conn.execute(f"SELECT * FROM jobs{where} ORDER BY created_at DESC LIMIT ?", (*params, limit)).fetchall()
+        )
+
+
+def enqueue_step(run_id: str, step_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    definition = load_workflow(get_run(run_id)["workflow_id"])
+    step = definition.step(step_id)
+    job_id = new_id("job")
+    ts = now_iso()
+    with connect() as conn:
+        existing = conn.execute(
+            "SELECT * FROM jobs WHERE run_id = ? AND step_id = ? AND status IN ('pending','running')",
+            (run_id, step_id),
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        conn.execute(
+            """
+            INSERT INTO jobs(id,run_id,step_id,job_type,status,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (job_id, run_id, step_id, step["executor"], "pending", json.dumps(payload or {}, ensure_ascii=False), ts, ts),
+        )
+    emit_event(run_id, "job.enqueued", f"step {step_id} enqueued", {"job_id": job_id})
+    return {"id": job_id, "run_id": run_id, "step_id": step_id, "status": "pending"}
+
+
+def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
+    with connect() as conn:
+        if run_id:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE status = 'pending' AND run_id = ? ORDER BY created_at LIMIT 1",
+                (run_id,),
+            ).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1").fetchone()
+        if not row:
+            return {"ok": True, "idle": True}
+        job = dict(row)
+        ts = now_iso()
+        conn.execute(
+            "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?, updated_at = ? WHERE id = ?",
+            (ts, ts, job["id"]),
+        )
+    try:
+        result = execute_step(job["run_id"], job["step_id"], json.loads(job.get("payload_json") or "{}"))
+        with connect() as conn:
+            ts = now_iso()
+            conn.execute(
+                "UPDATE jobs SET status = 'done', result_json = ?, finished_at = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(result, ensure_ascii=False), ts, ts, job["id"]),
+            )
+        return {"ok": True, "job_id": job["id"], "result": result}
+    except Exception as exc:
+        with connect() as conn:
+            ts = now_iso()
+            conn.execute(
+                "UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE id = ?",
+                (str(exc), ts, ts, job["id"]),
+            )
+        emit_event(job["run_id"], "job.failed", str(exc), {"job_id": job["id"], "step_id": job["step_id"]})
+        return {"ok": False, "job_id": job["id"], "error": str(exc)}
+
+
+def run_worker_until_blocked(
+    *,
+    run_id: str | None = None,
+    max_jobs: int = 50,
+    stop_steps: set[str] | None = None,
+) -> dict[str, Any]:
+    stop_steps = stop_steps or set()
+    results: list[dict[str, Any]] = []
+    for _ in range(max_jobs):
+        current_status = status(run_id) if run_id else None
+        current = current_status["run"] if current_status else None
+        if current and current["current_step"] in stop_steps and any(
+            gate["step_id"] == current["current_step"] and gate["status"] == "open" for gate in current_status["gates"]
+        ):
+            break
+        item = run_worker_once(run_id=run_id)
+        results.append(item)
+        if not item.get("ok"):
+            return {"ok": False, "stopped": "failed", "results": results}
+        if item.get("idle"):
+            return {"ok": True, "stopped": "idle", "results": results}
+        result = item.get("result") or {}
+        if result.get("blocked"):
+            return {"ok": True, "stopped": "blocked", "results": results}
+        if result.get("step_id") in stop_steps:
+            break
+    return {"ok": True, "stopped": "limit_or_stop_step", "results": results}
+
+
+def execute_step(run_id: str, step_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    run = get_run(run_id)
+    definition = load_workflow(run["workflow_id"])
+    step = definition.step(step_id)
+    _mark_step(run_id, step, "running", payload)
+    _notify_step(run, step, "started", payload)
+    executor = step["executor"]
+    if executor == "gate":
+        result = _open_gate(run_id, step)
+        _mark_step(run_id, step, "blocked", result)
+        _notify_step(run, step, "blocked", result)
+        return result
+    if executor == "agent":
+        result = _run_agent_step(run, definition, step)
+    elif executor == "validator":
+        result = _run_validator(run_id, step)
+    elif executor == "dev-runner":
+        result = _run_dev_step(run, definition, step)
+    elif executor == "lark-doc":
+        result = _publish_lark_doc(run_id, step)
+    elif executor == "notify":
+        result = _notify(run_id, step)
+    else:
+        result = _run_system_step(run_id, step)
+    _mark_step(run_id, step, "completed", result)
+    _notify_step(run, step, "completed", result)
+    next_step = _next_step(step, result)
+    _move_to_next(run_id, next_step)
+    if next_step:
+        enqueue_step(run_id, next_step)
+    return {"step_id": step_id, "status": "completed", "result": result, "next_step": next_step}
+
+
+def submit_gate(run_id: str, step_id: str, data: dict[str, Any]) -> dict[str, Any]:
+    run = get_run(run_id)
+    definition = load_workflow(run["workflow_id"])
+    step = definition.step(step_id)
+    schema = step.get("gate", {}).get("schema", {})
+    errors = _validate_gate(schema, data)
+    if errors:
+        raise WorkflowError("; ".join(errors))
+    ts = now_iso()
+    with connect() as conn:
+        gate = conn.execute("SELECT * FROM gates WHERE run_id = ? AND step_id = ?", (run_id, step_id)).fetchone()
+        if not gate:
+            raise WorkflowError(f"gate is not open: {step_id}")
+        conn.execute(
+            "UPDATE gates SET status = 'submitted', data_json = ?, updated_at = ? WHERE run_id = ? AND step_id = ?",
+            (json.dumps(data, ensure_ascii=False), ts, run_id, step_id),
+        )
+    write_artifact(
+        run_id,
+        f"{step_id}_gate",
+        json.dumps(data, ensure_ascii=False, indent=2),
+        category="gate",
+        created_by="workflow",
+    )
+    _mark_step(run_id, step, "completed", {"gate": data})
+    next_step = _next_step(step, data)
+    _move_to_next(run_id, next_step)
+    if next_step:
+        enqueue_step(run_id, next_step)
+    emit_event(run_id, "gate.submitted", f"gate {step_id} submitted", data)
+    _notify_gate_submitted(run, step, data)
+    return {"ok": True, "run_id": run_id, "step_id": step_id, "next_step": next_step}
+
+
+def handle_lark_card_event(payload: dict[str, Any]) -> dict[str, Any]:
+    value = _extract_lark_action_value(payload)
+    action = value.get("action")
+    if action not in {"approve_prd", "reject_prd"}:
+        raise WorkflowError(f"unsupported lark card action: {action}")
+    run_id = value.get("run_id")
+    step_id = value.get("step_id") or "prd-approval"
+    if not isinstance(run_id, str) or not run_id:
+        raise WorkflowError("lark card event missing run_id")
+    approved = bool(value.get("approved"))
+    approver = _extract_lark_operator(payload)
+    result = submit_gate(
+        run_id,
+        step_id,
+        {
+            "approved": approved,
+            "approver": approver,
+            "comment": "来自飞书审批卡片事件",
+        },
+    )
+    emit_event(run_id, "lark.card_event.handled", f"飞书审批卡片事件已处理: {action}", {"action": action, "approved": approved})
+    return {"ok": True, "action": action, "approved": approved, "gate": result}
+
+
+def retry_prd_approval_lark(run_id: str) -> dict[str, Any]:
+    run = get_run(run_id)
+    definition = load_workflow(run["workflow_id"])
+    step = definition.step("prd-approval")
+    try:
+        read_artifact(run_id, "prd_v2")
+    except WorkflowError as exc:
+        raise WorkflowError("cannot retry PRD approval lark actions before prd_v2 exists") from exc
+    result = _publish_prd_v2_doc_and_send_approval(run_id, step)
+    emit_event(run_id, "lark.prd_approval.retry", "已重试 PRD v2 飞书文档和审批卡片发送。", result)
+    return {"ok": bool(result.get("ok")), "run_id": run_id, "result": result}
+
+
+def status(run_id: str) -> dict[str, Any]:
+    run = get_run(run_id)
+    with connect() as conn:
+        steps = row_dicts(conn.execute("SELECT * FROM step_runs WHERE run_id = ? ORDER BY started_at", (run_id,)).fetchall())
+        gates = row_dicts(conn.execute("SELECT * FROM gates WHERE run_id = ? ORDER BY created_at", (run_id,)).fetchall())
+        jobs = row_dicts(conn.execute("SELECT * FROM jobs WHERE run_id = ? ORDER BY created_at DESC LIMIT 20", (run_id,)).fetchall())
+        artifacts = list_artifacts(run_id)
+        events = row_dicts(conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY created_at DESC LIMIT 20", (run_id,)).fetchall())
+    return {"run": run, "step_runs": steps, "gates": gates, "jobs": jobs, "artifacts": artifacts, "events": events}
+
+
+def write_artifact(
+    run_id: str,
+    name: str,
+    content: str,
+    *,
+    category: str,
+    created_by: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    with connect() as conn:
+        previous = conn.execute("SELECT MAX(version) AS version FROM artifacts WHERE run_id = ? AND name = ?", (run_id, name)).fetchone()
+        version = int(previous["version"] or 0) + 1
+    project_id = _project_id_for_run(run_id)
+    path = artifact_root() / project_id / _path_segment(created_by) / category / f"v{version}" / _artifact_filename(name, content)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    item_id = new_id("art")
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO artifacts(id,run_id,name,category,path,version,created_by,metadata_json,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (item_id, run_id, name, category, str(path), version, created_by, json.dumps(metadata or {}, ensure_ascii=False), ts),
+        )
+    return {"id": item_id, "run_id": run_id, "name": name, "path": str(path), "version": version}
+
+
+def read_artifact(run_id: str, name: str) -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM artifacts WHERE run_id = ? AND name = ? ORDER BY version DESC LIMIT 1",
+            (run_id, name),
+        ).fetchone()
+    if not row:
+        raise WorkflowError(f"artifact not found: {name}")
+    item = dict(row)
+    item["content"] = Path(item["path"]).read_text(encoding="utf-8")
+    return item
+
+
+def list_artifacts(run_id: str) -> list[dict[str, Any]]:
+    with connect() as conn:
+        return row_dicts(conn.execute("SELECT * FROM artifacts WHERE run_id = ? ORDER BY created_at", (run_id,)).fetchall())
+
+
+def emit_event(run_id: str, event_type: str, message: str, payload: dict[str, Any] | None = None) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO events(id,run_id,event_type,message,payload_json,created_at) VALUES(?,?,?,?,?,?)",
+            (new_id("evt"), run_id, event_type, message, json.dumps(payload or {}, ensure_ascii=False), now_iso()),
+        )
+
+
+def inspect_workflow(workflow_id: str = DEFAULT_WORKFLOW_ID) -> dict[str, Any]:
+    definition = load_workflow(workflow_id)
+    return {
+        "id": definition.workflow_id,
+        "name": definition.name,
+        "version": definition.version,
+        "steps": definition.steps,
+    }
+
+
+def workflows() -> list[dict[str, str]]:
+    return list_workflows()
+
+
+def _open_gate(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    schema = step.get("gate", {}).get("schema", {})
+    lark_result = _publish_prd_v2_doc_and_send_approval(run_id, step) if step["id"] == "prd-approval" else None
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO gates(id,run_id,step_id,status,schema_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?)
+            """,
+            (new_id("gate"), run_id, step["id"], "open", json.dumps(schema, ensure_ascii=False), ts, ts),
+        )
+    card = {
+        "type": "approval" if step.get("gate", {}).get("kind") == "approval" else "input",
+        "title": step["name"],
+        "step_id": step["id"],
+        "schema": schema,
+        "actions": step.get("gate", {}).get("actions", []),
+    }
+    if lark_result is not None:
+        card["lark"] = lark_result
+    emit_event(run_id, "gate.opened", f"gate {step['id']} opened", card)
+    return {"blocked": True, "gate": card}
+
+
+def _run_agent_step(run: dict[str, Any], definition: WorkflowDefinition, step: dict[str, Any]) -> dict[str, Any]:
+    prompt = _render_prompt(run["id"], definition, step)
+    package = write_artifact(
+        run["id"],
+        f"{step['id']}_agent_task",
+        prompt,
+        category="agent-task",
+        created_by=step.get("agent", "agent"),
+        metadata={"agent": step.get("agent"), "step_id": step["id"]},
+    )
+    command = build_agent_command(run["project"]["platform"], Path(package["path"]))
+    execution = maybe_run_command(command)
+    outputs = []
+    for artifact_name in step.get("outputs", []):
+        content = _agent_output_template(step, artifact_name, prompt, execution)
+        outputs.append(write_artifact(run["id"], artifact_name, content, category=step.get("artifact_category", "agent"), created_by=step.get("agent", "agent")))
+    return {"agent": step.get("agent"), "task_package": package, "execution": execution, "outputs": outputs}
+
+
+def _run_dev_step(run: dict[str, Any], definition: WorkflowDefinition, step: dict[str, Any]) -> dict[str, Any]:
+    prompt = _render_prompt(run["id"], definition, step)
+    platform = code_platform_for_step(load_config(), step.get("id"), fallback=run["project"]["platform"])
+    executor = select_dev_executor(platform)
+    package = write_artifact(
+        run["id"],
+        f"{step['id']}_dev_task",
+        prompt,
+        category="dev-task",
+        created_by=f"{executor}-adapter",
+        metadata={"executor": executor, "platform": platform},
+    )
+    command = build_agent_command(platform, Path(package["path"]))
+    execution = maybe_run_command(command)
+    result_name = step.get("outputs", [f"{step['id']}_result"])[0]
+    result = write_artifact(
+        run["id"],
+        result_name,
+        json.dumps(
+            {
+                "executor": executor,
+                "platform": platform,
+                "task_package": package["path"],
+                "execution": execution,
+                "status": "prepared" if not execution.get("executed") else "executed",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        category="dev-result",
+        created_by=f"{executor}-adapter",
+    )
+    return {"executor": executor, "task_package": package, "execution": execution, "result": result}
+
+
+def _run_validator(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    missing = []
+    for name in step.get("requires", []):
+        try:
+            artifact = read_artifact(run_id, name)
+        except WorkflowError:
+            missing.append(name)
+            continue
+        if not artifact["content"].strip():
+            missing.append(name)
+    result = {"can_proceed": not missing, "missing_artifacts": missing, "step_id": step["id"]}
+    write_artifact(run_id, step.get("outputs", [f"{step['id']}_validation"])[0], json.dumps(result, ensure_ascii=False, indent=2), category="validation", created_by="validator")
+    if missing:
+        raise WorkflowError(f"validator blocked {step['id']}: missing {', '.join(missing)}")
+    return result
+
+
+def _run_system_step(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    outputs = []
+    for name in step.get("outputs", []):
+        outputs.append(write_artifact(run_id, name, f"# {step['name']}\n\n系统步骤 `{step['id']}` 已完成。\n", category=step.get("artifact_category", "system"), created_by="workflow"))
+    return {"outputs": outputs}
+
+
+def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    config = load_config()
+    capability = lark_doc_capability()
+    source_name = step.get("source_artifact", "final_delivery_report")
+    source = read_artifact(run_id, source_name)
+    if not capability["ok"]:
+        raise WorkflowError(f"缺少飞书文档能力: {capability['install_hint']}")
+    title = f"{step['name']} - {run_id}"
+    result = create_doc_as_bot(title, source["content"], identity=lark_identity(config), dry_run=config_lark_dry_run(config))
+    if not result.get("ok"):
+        raise WorkflowError(f"飞书文档创建失败: {json.dumps(result, ensure_ascii=False)[-800:]}")
+    artifact = write_artifact(run_id, "final_report_lark_doc", json.dumps(result, ensure_ascii=False, indent=2), category="release", created_by="lark-bot")
+    return {"capability": capability, "artifact": artifact, "lark_cli": result}
+
+
+def _notify(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    message = step.get("message", f"{step['name']} completed")
+    emit_event(run_id, "notification", message, {"step_id": step["id"]})
+    _send_lark_text(get_run(run_id), message, event_key=f"{run_id}:{step['id']}:notify")
+    return {"message": message}
+
+
+def _publish_prd_v2_doc_and_send_approval(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
+    config = load_config()
+    lark = lark_config(config)
+    run = get_run(run_id)
+    chat_id = _lark_chat_id(run)
+    dry_run = _lark_dry_run()
+    if not lark_enabled(config):
+        result = {"ok": True, "skipped": True, "reason": "lark disabled by config"}
+        emit_event(run_id, "lark.prd_approval.skipped", "配置已关闭飞书动作，未创建 PRD 飞书文档和审批卡片。", result)
+        return result
+    if not chat_id and not bool(lark.get("create_prd_doc_without_chat")):
+        result = {"ok": True, "skipped": True, "reason": "missing lark chat_id"}
+        emit_event(run_id, "lark.prd_approval.skipped", "未配置飞书群聊，跳过 PRD 文档和审批卡片。", result)
+        return result
+    if not dry_run and not lark_available():
+        result = {"ok": False, "skipped": True, "reason": "lark-cli not found; run doctor and install via npx @larksuite/cli@latest install"}
+        emit_event(run_id, "lark.prd_approval.skipped", "缺少 lark-cli，未创建 PRD 飞书文档和审批卡片。", result)
+        return result
+
+    prd_v2 = read_artifact(run_id, "prd_v2")
+    title_template = str(lark.get("prd_doc_title_template") or "{project_title}PRD")
+    title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
+    _send_lark_text(run, f"PRD v2 已生成，开始创建飞书文档：{title}", event_key=f"{run_id}:prd-v2-doc:start")
+    doc_result = create_doc_as_bot(title, prd_v2["content"], identity=lark_identity(config), dry_run=dry_run)
+    doc_url = extract_doc_url(doc_result)
+    if not doc_url and dry_run:
+        doc_url = f"dry-run://lark-doc/{run['project_id']}/prd-v2"
+    doc_artifact = write_artifact(
+        run_id,
+        "prd_v2_lark_doc",
+        json.dumps({"title": title, "url": doc_url, "result": doc_result}, ensure_ascii=False, indent=2),
+        category="prd",
+        created_by="lark-bot",
+    )
+    if not doc_result.get("ok"):
+        payload = {"result": doc_result}
+        if doc_result.get("error_type") == "keychain_unavailable":
+            payload["retry_command"] = _host_lark_retry_command(run_id)
+            payload["host_escalation"] = _host_escalation_payload(payload["retry_command"])
+        emit_event(run_id, "lark.prd_doc.failed", "PRD v2 飞书文档创建失败。", payload)
+        return {"ok": False, "doc": doc_artifact, "doc_result": doc_result}
+    if not chat_id:
+        result = {"ok": True, "doc": doc_artifact, "doc_url": doc_url, "card_skipped": True, "reason": "missing lark_chat_id"}
+        emit_event(run_id, "lark.prd_approval.doc_created", "PRD v2 飞书文档已创建，未配置飞书群聊所以未发送审批卡片。", result)
+        return result
+    if not doc_url:
+        result = {"ok": False, "doc": doc_artifact, "card_skipped": True, "reason": "lark doc url missing", "doc_result": doc_result}
+        emit_event(run_id, "lark.prd_approval.card_skipped", "PRD v2 飞书文档 URL 缺失，未发送审批卡片。", result)
+        return result
+
+    if not bool(lark.get("send_prd_approval_card", True)):
+        result = {"ok": True, "doc": doc_artifact, "doc_url": doc_url, "card_skipped": True, "reason": "approval card disabled by config"}
+        emit_event(run_id, "lark.prd_approval.card_skipped", "配置已关闭 PRD 审批卡片发送。", result)
+        return result
+    _send_lark_text(run, f"开始发送 PRD 审批卡片，文档链接：{doc_url}", event_key=f"{run_id}:prd-approval-card:start")
+    card_result = send_approval_card_as_bot(
+        chat_id=chat_id,
+        project_title=run["project"]["title"],
+        project_id=run["project_id"],
+        run_id=run_id,
+        step_id=step["id"],
+        doc_url=doc_url,
+        identity=lark_identity(config),
+        dry_run=dry_run,
+        idempotency_key=f"{run_id}:{step['id']}:approval-card",
+    )
+    card_artifact = write_artifact(
+        run_id,
+        "prd_approval_card_message",
+        json.dumps({"chat_id": chat_id, "doc_url": doc_url, "result": card_result}, ensure_ascii=False, indent=2),
+        category="approval",
+        created_by="lark-bot",
+    )
+    message = "PRD v2 飞书文档和审批卡片已发送。" if card_result.get("ok") else "PRD v2 飞书审批卡片发送失败。"
+    payload = {"doc_url": doc_url, "card_result": card_result}
+    if card_result.get("error_type") == "keychain_unavailable":
+        payload["retry_command"] = _host_lark_retry_command(run_id)
+        payload["host_escalation"] = _host_escalation_payload(payload["retry_command"])
+    emit_event(run_id, "lark.prd_approval.card_sent" if card_result.get("ok") else "lark.prd_approval.card_failed", message, payload)
+    return {"ok": bool(card_result.get("ok")), "doc": doc_artifact, "doc_url": doc_url, "card": card_artifact, "card_result": card_result}
+
+
+def _host_escalation_payload(command: str) -> dict[str, Any]:
+    return {
+        "required": True,
+        "reason": "lark-cli 在当前沙箱无法读取 macOS Keychain 凭证，需要由 Codex 宿主请求沙箱外执行，继续完成自动化飞书发送。",
+        "command": command,
+        "persistent_prefix_rule": [str(PLUGIN_ROOT / "scripts" / "deliveryflow-host-lark"), "retry-prd-approval"],
+    }
+
+
+def _host_lark_retry_command(run_id: str) -> str:
+    script = PLUGIN_ROOT / "scripts" / "deliveryflow-host-lark"
+    return f"{shlex.quote(str(script))} retry-prd-approval --workspace {shlex.quote(str(Path.cwd()))} --run-id {shlex.quote(run_id)}"
+
+
+def _notify_step(run: dict[str, Any], step: dict[str, Any], phase: str, payload: dict[str, Any]) -> None:
+    message = _step_notification_message(step, phase)
+    emit_event(run["id"], f"workflow.step.{phase}", message, {"step_id": step["id"], "payload": payload})
+    _send_lark_text(run, message, event_key=f"{run['id']}:{step['id']}:{phase}")
+
+
+def _notify_gate_submitted(run: dict[str, Any], step: dict[str, Any], data: dict[str, Any]) -> None:
+    if step["id"] == "prd-approval":
+        state = "通过" if data.get("approved") else "拒绝"
+        message = f"PRD 审批已{state}，审批人：{data.get('approver', 'unknown')}"
+    elif step["id"] == "release-approval":
+        state = "通过" if data.get("approved") else "拒绝"
+        message = f"上线审批已{state}，审批人：{data.get('approver', 'unknown')}"
+    else:
+        message = f"{step['name']} 已提交。"
+    emit_event(run["id"], "workflow.gate.submitted.notification", message, {"step_id": step["id"], "gate": data})
+    _send_lark_text(run, message, event_key=f"{run['id']}:{step['id']}:submitted")
+
+
+def _step_notification_message(step: dict[str, Any], phase: str) -> str:
+    special = {
+        ("prd-v1", "started"): "开始创建 PRD v1。",
+        ("prd-v1", "completed"): "PRD v1 已创建完成。",
+        ("prd-validation", "started"): "开始执行 PRD v1 确定性校验。",
+        ("prd-validation", "completed"): "PRD v1 确定性校验已通过。",
+        ("multi-role-review", "started"): "产品、前端、后端、QA 四个 Agent 开始评审 PRD v1。",
+        ("multi-role-review", "completed"): "产品、前端、后端、QA 四个 Agent 已完成 PRD v1 评审。",
+        ("review-summary", "started"): "开始汇总评审意见并生成 PRD v2。",
+        ("review-summary", "completed"): "评审意见已汇总，PRD v2 已生成。",
+        ("prd-approval", "started"): "开始创建 PRD v2 飞书文档并发送审批确认卡片。",
+        ("prd-approval", "blocked"): "PRD 审批 Gate 已打开，等待飞书审批卡片事件或人工提交 Gate。",
+    }
+    if (step["id"], phase) in special:
+        return special[(step["id"], phase)]
+    if phase == "started":
+        return f"开始执行：{step['name']}。"
+    if phase == "completed":
+        return f"已完成：{step['name']}。"
+    if phase == "blocked":
+        return f"{step['name']} 已进入等待状态。"
+    return f"{step['name']} 状态变更：{phase}。"
+
+
+def _send_lark_text(run: dict[str, Any], message: str, *, event_key: str) -> dict[str, Any] | None:
+    config = load_config()
+    if not lark_enabled(config) or not bool(lark_config(config).get("send_step_notifications", True)):
+        return None
+    chat_id = _lark_chat_id(run)
+    if not chat_id:
+        return None
+    result = send_text_as_bot(chat_id, message, identity=lark_identity(config), dry_run=config_lark_dry_run(config), idempotency_key=event_key)
+    emit_event(
+        run["id"],
+        "lark.notify.sent" if result.get("ok") else "lark.notify.failed",
+        message,
+        {"chat_id": chat_id, "result": result},
+    )
+    return result
+
+
+def _lark_chat_id(run: dict[str, Any]) -> str | None:
+    return config_lark_chat_id(load_config(), (run.get("project") or {}).get("lark_chat_id"))
+
+
+def _lark_dry_run() -> bool:
+    return config_lark_dry_run(load_config())
+
+
+def _extract_lark_action_value(payload: dict[str, Any]) -> dict[str, Any]:
+    candidates: list[Any] = [
+        payload.get("value"),
+        (payload.get("action") or {}).get("value") if isinstance(payload.get("action"), dict) else None,
+        ((payload.get("event") or {}).get("action") or {}).get("value") if isinstance(payload.get("event"), dict) and isinstance((payload.get("event") or {}).get("action"), dict) else None,
+        ((payload.get("event") or {}).get("operator") or {}).get("value") if isinstance(payload.get("event"), dict) and isinstance((payload.get("event") or {}).get("operator"), dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str):
+            try:
+                candidate = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+        if isinstance(candidate, dict) and "action" in candidate:
+            return candidate
+    if "action" in payload:
+        return payload
+    raise WorkflowError("cannot find lark card action value")
+
+
+def _extract_lark_operator(payload: dict[str, Any]) -> str:
+    candidates = [
+        payload.get("operator"),
+        payload.get("user"),
+        (payload.get("event") or {}).get("operator") if isinstance(payload.get("event"), dict) else None,
+        (payload.get("event") or {}).get("user") if isinstance(payload.get("event"), dict) else None,
+    ]
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate
+        if isinstance(candidate, dict):
+            for key in ("open_id", "user_id", "union_id", "name"):
+                value = candidate.get(key)
+                if isinstance(value, str) and value:
+                    return value
+    return "lark-card-user"
+
+
+def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, Any]) -> str:
+    refs = []
+    for name in step.get("inputs", []):
+        try:
+            artifact = read_artifact(run_id, name)
+            refs.append(f"## Artifact: {name}\n\n{artifact['content']}")
+        except WorkflowError:
+            refs.append(f"## Artifact: {name}\n\n<missing>")
+    instruction = definition.reference_text(step)
+    return "\n\n".join(
+        [
+            f"# Workflow Step: {step['id']}",
+            f"Agent: {step.get('agent', 'workflow')}",
+            f"Category: {step['category']}",
+            instruction,
+            "## Inputs",
+            "\n\n".join(refs) if refs else "No explicit input artifacts.",
+            "## Required Outputs",
+            json.dumps(step.get("outputs", []), ensure_ascii=False, indent=2),
+        ]
+    )
+
+
+def _agent_output_template(step: dict[str, Any], artifact_name: str, prompt: str, execution: dict[str, Any]) -> str:
+    return (
+        f"# {step['name']} / {artifact_name}\n\n"
+        f"此产物由 `{step.get('agent', 'agent')}` 的任务包生成。\n\n"
+        "## 执行状态\n\n"
+        f"```json\n{json.dumps(execution, ensure_ascii=False, indent=2)}\n```\n\n"
+        "## 任务摘要\n\n"
+        f"- Step: `{step['id']}`\n"
+        f"- Prompt chars: {len(prompt)}\n"
+        "- Agent 负责补全业务判断；Workflow 负责状态流转、Gate 和产物归档。\n"
+    )
+
+
+def _validate_gate(schema: dict[str, Any], data: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    for field, spec in schema.items():
+        if spec.get("required") and field not in data:
+            errors.append(f"{field} is required")
+            continue
+        if field in data:
+            expected = spec.get("type")
+            if expected == "boolean" and not isinstance(data[field], bool):
+                errors.append(f"{field} must be boolean")
+            if expected == "string" and not isinstance(data[field], str):
+                errors.append(f"{field} must be string")
+    return errors
+
+
+def _next_step(step: dict[str, Any], result: dict[str, Any]) -> str | None:
+    transitions = step.get("next", {})
+    if not transitions:
+        return None
+    if result.get("approved") is True and "approved" in transitions:
+        return transitions["approved"]
+    if result.get("approved") is False and "rejected" in transitions:
+        return transitions["rejected"]
+    if result.get("can_proceed") is False and "failed" in transitions:
+        return transitions["failed"]
+    return transitions.get("default")
+
+
+def _move_to_next(run_id: str, next_step: str | None) -> None:
+    ts = now_iso()
+    status_value = "completed" if next_step is None else "running"
+    current_step = next_step or ""
+    with connect() as conn:
+        conn.execute("UPDATE workflow_runs SET current_step = ?, status = ?, updated_at = ? WHERE id = ?", (current_step, status_value, ts, run_id))
+        conn.execute(
+            "UPDATE projects SET status = ?, updated_at = ? WHERE id = (SELECT project_id FROM workflow_runs WHERE id = ?)",
+            (status_value, ts, run_id),
+        )
+
+
+def _mark_step(run_id: str, step: dict[str, Any], status_value: str, payload: dict[str, Any]) -> None:
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO step_runs(id,run_id,step_id,category,executor,status,input_json,started_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            ON CONFLICT(run_id, step_id) DO UPDATE SET
+              status=excluded.status,
+              output_json=CASE WHEN excluded.status IN ('completed','blocked') THEN ? ELSE step_runs.output_json END,
+              completed_at=CASE WHEN excluded.status IN ('completed','blocked') THEN ? ELSE step_runs.completed_at END
+            """,
+            (
+                new_id("step"),
+                run_id,
+                step["id"],
+                step["category"],
+                step["executor"],
+                status_value,
+                json.dumps(payload, ensure_ascii=False),
+                ts,
+                json.dumps(payload, ensure_ascii=False),
+                ts,
+            ),
+        )
+
+
+def _artifact_filename(name: str, content: str) -> str:
+    suffix = ".json" if content.lstrip().startswith(("{", "[")) else ".md"
+    return f"{name.replace('_', '-')}{suffix}"
+
+
+def _path_segment(value: str) -> str:
+    segment = re.sub(r"[^a-zA-Z0-9.-]+", "-", value.strip().lower().replace("_", "-")).strip("-")
+    return segment or "workflow"
+
+
+def _project_id_for_run(run_id: str) -> str:
+    with connect() as conn:
+        row = conn.execute("SELECT project_id FROM workflow_runs WHERE id = ?", (run_id,)).fetchone()
+    if not row:
+        raise WorkflowError(f"workflow run not found: {run_id}")
+    return str(row["project_id"])
+
+
+def _new_project_id(title: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", title.lower()).strip("-")
+    if not slug:
+        slug = "project"
+    base = new_id("proj")
+    return f"{base}-{slug[:40]}"

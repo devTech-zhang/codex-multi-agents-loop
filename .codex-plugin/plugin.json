@@ -1,0 +1,34 @@
+{
+  "name": "delivery-workflow",
+  "version": "0.1.0+codex.20260605025714",
+  "description": "Platform-neutral delivery Workflow Worker and multi-agent orchestration for Codex.",
+  "author": {
+    "name": "devTech-Zhang"
+  },
+  "keywords": [
+    "workflow",
+    "delivery",
+    "codex",
+    "multi-agent"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Delivery Workflow",
+    "shortDescription": "Run file-based delivery workflows with gates, workers, and agents.",
+    "longDescription": "A platform-neutral software delivery workflow worker. It keeps workflow state in SQLite, stores artifacts on disk, separates interactive gates, automated work, and notifications, and exposes CLI/MCP tools for Codex-first orchestration.",
+    "developerName": "devTech-Zhang",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write",
+      "MCP"
+    ],
+    "defaultPrompt": [
+      "Start a delivery workflow",
+      "Check delivery workflow status",
+      "Run the delivery worker once"
+    ],
+    "brandColor": "#2563EB"
+  },
+  "mcpServers": "./.mcp.json"
+}
