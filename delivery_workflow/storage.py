@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .paths import artifact_root, db_path
+from .paths import artifact_root, db_path, log_root, source_root
 
 
 SCHEMA = """
@@ -115,6 +115,8 @@ def init_db() -> Path:
     path = db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     artifact_root().mkdir(parents=True, exist_ok=True)
+    source_root().mkdir(parents=True, exist_ok=True)
+    log_root().mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
         conn.execute("PRAGMA journal_mode=WAL")

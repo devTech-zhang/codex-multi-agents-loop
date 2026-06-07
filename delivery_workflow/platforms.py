@@ -62,13 +62,33 @@ def maybe_run_command(command: PlatformCommand) -> dict[str, Any]:
         timeout=1800,
         input=command.input_text,
     )
-    return {
+    result = {
         "executed": True,
         "returncode": completed.returncode,
-        "stdout": completed.stdout[-4000:],
-        "stderr": completed.stderr[-4000:],
+        "stdout": completed.stdout,
+        "stderr": completed.stderr[-12000:],
         "command": command.command,
     }
+    if execution_needs_permission(result):
+        result["blocked"] = True
+        result["reason"] = "agent CLI requested interactive write/permission approval"
+    return result
+
+
+def execution_needs_permission(execution: dict[str, Any]) -> bool:
+    text = "\n".join(str(execution.get(key) or "") for key in ("stdout", "stderr")).lower()
+    needles = [
+        "等待你的写入审批",
+        "等待写入审批",
+        "审批写入",
+        "需要你的审批",
+        "need your approval to write",
+        "i need your approval to write",
+        "after approval",
+        "waiting for approval",
+        "permission denied",
+    ]
+    return any(needle in text for needle in needles)
 
 
 def _first_available_binary(candidates: list[str]) -> str | None:
@@ -87,7 +107,7 @@ def _default_binary_candidates(platform: str) -> list[str]:
 
 def _default_command_template(platform: str) -> list[str]:
     if platform == "claude-code":
-        return ["{binary}", "-p"]
+        return ["{binary}", "--permission-mode", "acceptEdits", "-p"]
     return ["{binary}", "exec", "--file", "{prompt_path}"]
 
 

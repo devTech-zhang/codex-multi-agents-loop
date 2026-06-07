@@ -1,28 +1,53 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 from pathlib import Path
 from typing import Any
 
-WORKSPACE_CONFIG_NAME = "delivery-workflow.config.json"
+WORKSPACE_CONFIG_NAME = "workflow.config.json"
+PLUGIN_CONFIG_NAME = "delivery-workflow.config.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PLUGIN_ROOT = PACKAGE_ROOT.parent
+
+# Mapping from env var to config path (list of keys).
+# Loaded from .env file at plugin root, overrides config.json values.
+_ENV_CONFIG_MAP: dict[str, list[str]] = {
+    "LARK_APP_ID": ["lark", "sdk", "app_id"],
+    "LARK_APP_SECRET": ["lark", "sdk", "app_secret"],
+    "LARK_CHAT_ID": ["lark", "chat_id"],
+}
 
 DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
     "storage": {
         "home": ".delivery-workflow",
         "db": ".delivery-workflow/delivery.db",
-        "artifact_root": "delivery-projects",
+        "artifact_root": "delivery-project",
+        "source_root": "source-code",
+        "logs": ".delivery-workflow/logs",
+    },
+    "quality_gate": {
+        "block": 0,
+        "critical": 0,
+        "major": 2,
+        "minor": 5,
     },
     "workflow": {
         "auto_start": True,
         "auto_run_to_gate": True,
+        "continue_after_gate": True,
+        "continue_after_gate_max_jobs": 50,
+        "mcp_auto_watch_after_create": True,
+        "watch_timeout_seconds": 7200,
+        "watch_poll_interval_seconds": 2.0,
     },
     "code_platforms": {
-        "default": "codex",
-        "frontend": "codex",
-        "backend": "codex",
-        "other": "codex",
+        "auto_detect": True,
+        "default": "auto",
+        "frontend": "auto",
+        "backend": "auto",
+        "other": "auto",
         "enable_agent_cli": False,
         "executors": {
             "codex": {
@@ -31,7 +56,7 @@ DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
             },
             "claude-code": {
                 "binary_candidates": ["claude"],
-                "command": ["{binary}", "-p"],
+                "command": ["{binary}", "--permission-mode", "acceptEdits", "-p"],
                 "stdin_from_prompt": True,
             },
             "opencode": {
@@ -62,6 +87,10 @@ DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
         },
         "event": {
             "transport": "sdk_websocket",
+            "auto_start_consumer": True,
+        },
+        "bot_commands": {
+            "enabled": True,
         },
     },
 }
@@ -71,9 +100,12 @@ def load_config() -> dict[str, Any]:
     path = workspace_config_path()
     if not path.exists():
         raise FileNotFoundError(
-            f"missing {WORKSPACE_CONFIG_NAME}; run `python3 -m delivery_workflow.cli config init` in the plugin workspace"
+            f"missing {WORKSPACE_CONFIG_NAME}; run `python3 -m delivery_workflow.cli config init` in the project workspace"
         )
-    return _read_json(path)
+    config = _read_json(path)
+    from_env = _load_env_layers(path)
+    _apply_env_overrides(config, from_env)
+    return config
 
 
 def config_sources() -> list[str]:
@@ -82,23 +114,26 @@ def config_sources() -> list[str]:
 
 
 def workspace_config_path() -> Path:
-    workspace_local = Path.cwd() / WORKSPACE_CONFIG_NAME
-    if workspace_local.exists():
-        return workspace_local
-    return PLUGIN_ROOT / WORKSPACE_CONFIG_NAME
+    for candidate in (Path.cwd() / WORKSPACE_CONFIG_NAME, Path.cwd() / PLUGIN_CONFIG_NAME):
+        if candidate.exists():
+            return candidate
+    return PLUGIN_ROOT / PLUGIN_CONFIG_NAME
 
 
 def write_workspace_config(*, overwrite: bool = False) -> Path:
-    target = workspace_config_path()
+    target = Path.cwd() / WORKSPACE_CONFIG_NAME
     if target.exists() and not overwrite:
         raise FileExistsError(f"config already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(DEFAULT_CONFIG_TEMPLATE, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    source = PLUGIN_ROOT / PLUGIN_CONFIG_NAME
+    template = _read_json(source) if source.exists() else DEFAULT_CONFIG_TEMPLATE
+    target.write_text(json.dumps(template, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return target
 
 
 def code_platform_for_step(config: dict[str, Any], step_id: str | None = None, fallback: str | None = None) -> str:
     platforms = config.get("code_platforms") or {}
+    auto_detect = platforms.get("auto_detect", True)
     if step_id is None:
         value = platforms.get("default")
     elif step_id == "frontend-development":
@@ -107,16 +142,29 @@ def code_platform_for_step(config: dict[str, Any], step_id: str | None = None, f
         value = platforms.get("backend")
     else:
         value = platforms.get("other") or platforms.get("default")
-    return normalize_platform(value or fallback or platforms.get("default") or "codex")
+    raw = value or fallback or platforms.get("default") or "auto"
+    if raw == "auto" and not auto_detect:
+        return "codex"
+    return normalize_platform(raw)
 
 
 def normalize_platform(platform: str | None) -> str:
-    value = (platform or "codex").strip().lower().replace("_", "-")
+    value = (platform or "auto").strip().lower().replace("_", "-")
     if value in {"claude", "claude-code"}:
         return "claude-code"
     if value in {"codex", "opencode"}:
         return value
-    return value or "codex"
+    if value == "auto":
+        return detect_platform()
+    return detect_platform()
+
+
+def detect_platform() -> str:
+    """Auto-detect available platform CLI. Priority: claude → codex → opencode."""
+    for cmd, result in (("claude", "claude-code"), ("codex", "codex"), ("opencode", "opencode")):
+        if shutil.which(cmd):
+            return result
+    return "codex"
 
 
 def lark_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -151,8 +199,64 @@ def storage_path(config: dict[str, Any], key: str, fallback: str) -> Path:
     return path if path.is_absolute() else Path.cwd() / path
 
 
+def quality_gate_config(config: dict[str, Any]) -> dict[str, int]:
+    raw = config.get("quality_gate") or {}
+    return {
+        "block": int(raw.get("block", 0)),
+        "critical": int(raw.get("critical", 0)),
+        "major": int(raw.get("major", 2)),
+        "minor": int(raw.get("minor", 5)),
+    }
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"config must be a JSON object: {path}")
     return data
+
+
+def _load_env_layers(config_path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if config_path.resolve() == (PLUGIN_ROOT / PLUGIN_CONFIG_NAME).resolve():
+        values.update(_read_dotenv(PLUGIN_ROOT / ".env"))
+    values.update(_read_dotenv(Path.cwd() / ".env"))
+    return values
+
+
+def _read_dotenv(env_file: Path) -> dict[str, str]:
+    """Load KEY=VALUE pairs from .env. No dependency on python-dotenv."""
+    if not env_file.exists():
+        return {}
+    overrides: dict[str, str] = {}
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, value = stripped.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if key and value:
+            overrides[key] = value
+    return overrides
+
+
+def _apply_env_overrides(config: dict[str, Any], env_vals: dict[str, str] | None = None) -> None:
+    """Merge env values into config, taking precedence over config.json values.
+    Checks both the provided dict (from .env file) and os.environ (always).
+    os.environ takes precedence over .env values.
+    """
+    for env_key, config_path in _ENV_CONFIG_MAP.items():
+        value = os.environ.get(env_key) or (env_vals or {}).get(env_key)
+        if value:
+            _deep_set(config, config_path, value)
+
+
+def _deep_set(config: dict[str, Any], path: list[str], value: str) -> None:
+    """Set a nested dict value by key path, creating intermediate dicts as needed."""
+    node = config
+    for key in path[:-1]:
+        if key not in node or not isinstance(node.get(key), dict):
+            node[key] = {}
+        node = node[key]
+    node[path[-1]] = value

@@ -2,18 +2,32 @@
     "storage": {
         "home": ".delivery-workflow",
         "db": ".delivery-workflow/delivery.db",
-        "artifact_root": "delivery-projects"
+        "artifact_root": "delivery-project",
+        "source_root": "source-code",
+        "logs": ".delivery-workflow/logs"
+    },
+    "quality_gate": {
+        "block": 0,
+        "critical": 0,
+        "major": 2,
+        "minor": 5
     },
     "workflow": {
         "auto_start": true,
-        "auto_run_to_gate": true
+        "auto_run_to_gate": true,
+        "continue_after_gate": true,
+        "continue_after_gate_max_jobs": 50,
+        "mcp_auto_watch_after_create": true,
+        "watch_timeout_seconds": 7200,
+        "watch_poll_interval_seconds": 2.0
     },
     "code_platforms": {
-        "default": "codex",
-        "frontend": "codex",
-        "backend": "codex",
-        "other": "codex",
-        "enable_agent_cli": false,
+        "auto_detect": true,
+        "default": "auto",
+        "frontend": "auto",
+        "backend": "auto",
+        "other": "auto",
+        "enable_agent_cli": true,
         "executors": {
             "codex": {
                 "binary_candidates": ["codex"],
@@ -21,7 +35,7 @@
             },
             "claude-code": {
                 "binary_candidates": ["claude"],
-                "command": ["{binary}", "-p"],
+                "command": ["{binary}", "--permission-mode", "acceptEdits", "-p"],
                 "stdin_from_prompt": true
             },
             "opencode": {
@@ -33,7 +47,7 @@
     "lark": {
         "enabled": true,
         "identity": "bot",
-        "chat_id": "oc_be876ab84ee0944e5dd8e837f3934b75",
+        "chat_id": "",
         "dry_run": false,
         "send_step_notifications": true,
         "send_prd_approval_card": true,
@@ -46,12 +60,16 @@
         "sdk": {
             "credential_source": "lark-cli",
             "profile": "",
-            "app_id": "cli_aa8c697391a41bd0",
-            "app_secret": "8tgeWc1PIHI1KjHXUG5QehGS6wCUUyhz",
+            "app_id": "",
+            "app_secret": "",
             "log_level": "info"
         },
         "event": {
-            "transport": "sdk_websocket"
+            "transport": "sdk_websocket",
+            "auto_start_consumer": true
+        },
+        "bot_commands": {
+            "enabled": true
         }
     }
 }

@@ -62,7 +62,7 @@
       "agent": "product_manager",
       "artifact_category": "prd",
       "ref": "references/04-review-summary.md",
-      "inputs": ["prd_v1", "requirement_review_report"],
+      "inputs": ["prd_v1", "requirement_review_report", "prd-approval_gate"],
       "outputs": ["prd_v2"],
       "next": {"default": "prd-approval"}
     },
@@ -81,7 +81,7 @@
         },
         "actions": ["approve", "reject"]
       },
-      "next": {"approved": "ui-design-spec", "rejected": "prd-v1"}
+      "next": {"approved": "ui-design-spec", "rejected": "review-summary"}
     },
     {
       "id": "ui-design-spec",
@@ -93,18 +93,16 @@
       "ref": "references/06-ui-design-spec.md",
       "inputs": ["prd_v2"],
       "outputs": ["ui_design_spec"],
-      "next": {"default": "ui-high-fidelity-design"}
+      "next": {"default": "publish-ui-design-spec-doc"}
     },
     {
-      "id": "ui-high-fidelity-design",
-      "name": "Figma 高保真设计任务",
+      "id": "publish-ui-design-spec-doc",
+      "name": "发布飞书 UI 设计规范文档",
       "category": "automated",
-      "executor": "agent",
-      "agent": "ui_designer",
-      "artifact_category": "ui",
-      "ref": "references/07-ui-high-fidelity-design.md",
-      "inputs": ["prd_v2", "ui_design_spec"],
-      "outputs": ["figma_design_task"],
+      "executor": "lark-doc",
+      "source_artifact": "ui_design_spec",
+      "output_artifact": "ui_design_spec_lark_doc",
+      "title_template": "{project_title} 项目 UI 设计规范",
       "next": {"default": "frontend-tech-design"}
     },
     {
@@ -115,8 +113,18 @@
       "agent": "frontend_engineer",
       "artifact_category": "tech",
       "ref": "references/08-frontend-tech-design.md",
-      "inputs": ["prd_v2", "ui_design_spec", "figma_design_task"],
+      "inputs": ["prd_v2", "ui_design_spec"],
       "outputs": ["frontend_tech_design"],
+      "next": {"default": "publish-frontend-tech-doc"}
+    },
+    {
+      "id": "publish-frontend-tech-doc",
+      "name": "发布飞书前端技术方案文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "frontend_tech_design",
+      "output_artifact": "frontend_tech_design_lark_doc",
+      "title_template": "{project_title} 项目前端技术方案",
       "next": {"default": "backend-tech-design"}
     },
     {
@@ -129,6 +137,16 @@
       "ref": "references/09-backend-tech-design.md",
       "inputs": ["prd_v2"],
       "outputs": ["backend_tech_design"],
+      "next": {"default": "publish-backend-tech-doc"}
+    },
+    {
+      "id": "publish-backend-tech-doc",
+      "name": "发布飞书服务端设计方案文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "backend_tech_design",
+      "output_artifact": "backend_tech_design_lark_doc",
+      "title_template": "{project_title} 项目服务端设计方案",
       "next": {"default": "tech-review"}
     },
     {
@@ -171,7 +189,7 @@
       "category": "automated",
       "executor": "dev-runner",
       "ref": "references/13-frontend-development.md",
-      "inputs": ["dev_tasks", "frontend_tech_design", "ui_design_spec"],
+      "inputs": ["prd_v2", "dev_tasks", "frontend_tech_design", "ui_design_spec"],
       "outputs": ["frontend_dev_result"],
       "next": {"default": "backend-development"}
     },
@@ -195,6 +213,16 @@
       "ref": "references/15-test-case-design.md",
       "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result"],
       "outputs": ["test_cases"],
+      "next": {"default": "publish-test-cases-doc"}
+    },
+    {
+      "id": "publish-test-cases-doc",
+      "name": "发布飞书测试用例文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "test_cases",
+      "output_artifact": "test_cases_lark_doc",
+      "title_template": "{project_title} 项目测试用例",
       "next": {"default": "regression-testing"}
     },
     {
@@ -203,26 +231,29 @@
       "category": "automated",
       "executor": "dev-runner",
       "ref": "references/16-regression-testing.md",
-      "inputs": ["test_cases", "frontend_dev_result", "backend_dev_result"],
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
       "outputs": ["test_report"],
-      "next": {"default": "release-approval"}
+      "next": {"default": "publish-test-report-doc", "failed": "bug-fix"}
     },
     {
-      "id": "release-approval",
-      "name": "上线审批 Gate",
-      "category": "interactive",
-      "executor": "gate",
-      "ref": "references/17-release-approval.md",
-      "gate": {
-        "kind": "approval",
-        "schema": {
-          "approved": {"type": "boolean", "required": true},
-          "approver": {"type": "string", "required": true},
-          "comment": {"type": "string", "required": false}
-        },
-        "actions": ["approve", "reject"]
-      },
-      "next": {"approved": "final-report", "rejected": "regression-testing"}
+      "id": "publish-test-report-doc",
+      "name": "发布飞书测试报告文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "test_report",
+      "output_artifact": "test_report_lark_doc",
+      "title_template": "{project_title} 项目测试报告",
+      "next": {"default": "final-report"}
+    },
+    {
+      "id": "bug-fix",
+      "name": "修复 Bug",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/17-bug-fix.md",
+      "inputs": ["manual_bug_fix_request", "prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "test_report", "frontend_dev_result", "backend_dev_result"],
+      "outputs": ["bug_fix_result"],
+      "next": {"default": "regression-testing"}
     },
     {
       "id": "final-report",
@@ -232,7 +263,7 @@
       "agent": "delivery_manager",
       "artifact_category": "release",
       "ref": "references/18-final-report.md",
-      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "test_report", "release-approval_gate"],
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "test_report"],
       "outputs": ["final_delivery_report"],
       "next": {"default": "publish-final-report-doc"}
     },
@@ -249,7 +280,7 @@
       "name": "交付完成通知",
       "category": "notification",
       "executor": "notify",
-      "message": "软件交付 workflow 已完成，最终报告已发布。",
+      "message": "软件交付 workflow 已完成，已推进到上线并发布最终报告。",
       "next": {}
     }
   ]

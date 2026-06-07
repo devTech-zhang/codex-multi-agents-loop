@@ -1,0 +1,10 @@
+{
+    "name": "delivery-workflow",
+    "version": "0.1.6",
+    "description": "通用软件交付 Workflow Worker 与多 Agent 编排插件。编码支持平台自动检测（Claude Code / Codex / OpenCode），集成飞书审批、MCP 工具、文件化工作流。",
+    "author": {
+        "name": "devTech-Zhang"
+    },
+    "skills": ["./skills/"],
+    "agents": ["./.claude/agents/delivery-workflow.md"]
+}

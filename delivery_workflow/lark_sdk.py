@@ -56,7 +56,7 @@ def load_sdk_credentials(config: dict[str, Any]) -> LarkSdkCredentials:
     explicit_app_id = str(sdk.get("app_id") or "").strip()
     explicit_secret = str(sdk.get("app_secret") or "").strip()
     if explicit_app_id and explicit_secret:
-        return LarkSdkCredentials(app_id=explicit_app_id, app_secret=explicit_secret, source="delivery-workflow.config.json")
+        return LarkSdkCredentials(app_id=explicit_app_id, app_secret=explicit_secret, source="workflow.config.json")
 
     source = str(sdk.get("credential_source") or "lark-cli").strip().lower()
     if source != "lark-cli":

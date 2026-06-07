@@ -19,11 +19,13 @@ from .engine import (
     list_jobs,
     list_projects,
     read_artifact,
+    request_bug_fix,
     retry_prd_approval_lark,
     run_worker_once,
     run_worker_until_blocked,
     status,
     submit_gate,
+    watch_run,
     workflows,
     write_artifact,
 )
@@ -63,6 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     gate_p.add_argument("--run-id", required=True)
     gate_p.add_argument("--step-id", required=True)
     gate_p.add_argument("--data-json", required=True)
+    watch_p = workflow_sub.add_parser("watch")
+    watch_p.add_argument("--run-id", required=True)
+    watch_p.add_argument("--timeout-seconds", type=float)
+    watch_p.add_argument("--poll-interval-seconds", type=float)
 
     project = sub.add_parser("project")
     project_sub = project.add_subparsers(dest="project_command")
@@ -79,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
     list_p.add_argument("--limit", type=int, default=20)
     project_status_p = project_sub.add_parser("status")
     project_status_p.add_argument("project_id")
+    bugfix_p = project_sub.add_parser("bug-fix")
+    bugfix_p.add_argument("--issue", required=True)
+    bugfix_p.add_argument("--project-id")
+    bugfix_p.add_argument("--reporter")
     delete_p = project_sub.add_parser("delete")
     delete_p.add_argument("project_id")
     delete_p.add_argument("--confirm-project-id", required=True)
@@ -166,6 +176,15 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
         if args.workflow_command == "submit-gate":
             print_json(submit_gate(args.run_id, args.step_id, _json_obj(args.data_json)))
             return 0
+        if args.workflow_command == "watch":
+            print_json(
+                watch_run(
+                    args.run_id,
+                    timeout_seconds=args.timeout_seconds,
+                    poll_interval_seconds=args.poll_interval_seconds,
+                )
+            )
+            return 0
     if args.command == "project":
         if args.project_command == "create":
             print_json(
@@ -187,6 +206,9 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             return 0
         if args.project_command == "status":
             print_json({"ok": True, "status": get_project_status(args.project_id)})
+            return 0
+        if args.project_command == "bug-fix":
+            print_json(request_bug_fix(issue=args.issue, project_id=args.project_id, reporter=args.reporter, source="cli"))
             return 0
         if args.project_command == "delete":
             print_json(

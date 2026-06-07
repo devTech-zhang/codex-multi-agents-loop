@@ -1,0 +1,21 @@
+{
+  "name": "devTech-Zhang",
+  "owner": {
+    "name": "devTech-Zhang"
+  },
+  "metadata": {
+    "description": "Local Claude Code plugins by devTech-Zhang"
+  },
+  "plugins": [
+    {
+      "name": "delivery-workflow",
+      "source": "./",
+      "description": "通用软件交付 Workflow Worker 与多 Agent 编排插件。支持平台自动检测、飞书审批、MCP 工具和文件化工作流。",
+      "version": "0.1.0",
+      "author": {
+        "name": "devTech-Zhang"
+      },
+      "category": "workflow"
+    }
+  ]
+}

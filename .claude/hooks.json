@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write",
+        "command": "python3 -m delivery_workflow.cli worker once 2>/dev/null || true",
+        "description": "写入产物后自动推进 workflow（静默执行一次 Worker）"
+      }
+    ]
+  }
+}

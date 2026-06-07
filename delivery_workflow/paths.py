@@ -20,4 +20,12 @@ def db_path() -> Path:
 
 
 def artifact_root() -> Path:
-    return storage_path(load_config(), "artifact_root", "delivery-projects")
+    return storage_path(load_config(), "artifact_root", "delivery-project")
+
+
+def source_root() -> Path:
+    return storage_path(load_config(), "source_root", "source-code")
+
+
+def log_root() -> Path:
+    return storage_path(load_config(), "logs", ".delivery-workflow/logs")
