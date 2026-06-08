@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+import zipfile
 from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
@@ -14,7 +15,7 @@ from unittest.mock import patch
 from delivery_workflow.capabilities import doctor
 from delivery_workflow.config import DEFAULT_CONFIG_TEMPLATE, PLUGIN_ROOT, WORKSPACE_CONFIG_NAME, load_config
 from delivery_workflow.definitions import load_workflow
-from delivery_workflow.engine import WorkflowError, create_project, delete_project, emit_event, enqueue_step, execute_step, get_project_status, handle_lark_card_event, list_projects, read_artifact, request_bug_fix, retry_prd_approval_lark, run_worker_once, run_worker_until_blocked, status, submit_gate, watch_run, write_artifact
+from delivery_workflow.engine import WorkflowError, create_project, current_project_status, delete_current_project, emit_event, enqueue_step, execute_step, handle_lark_card_event, read_artifact, request_bug_fix, retry_prd_approval_lark, run_worker_once, run_worker_until_blocked, status, submit_gate, watch_run, write_artifact
 from delivery_workflow.engine import _host_escalation_payload, _host_lark_retry_command
 from delivery_workflow.lark import _is_keychain_unavailable, build_prd_approval_card
 from delivery_workflow.lark_daemon import _code_fingerprint, _terminate_process, ensure_lark_event_consumer
@@ -714,7 +715,7 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["stage"], "bot_command_project_created")
-        self.assertTrue(any(project["id"] == result["project"]["project_id"] for project in list_projects()))
+        self.assertEqual(current_project_status()["run"]["project_id"], result["project"]["project_id"])
 
     def test_lark_keychain_failure_detection_and_retry_entrypoint(self) -> None:
         self.assertTrue(_is_keychain_unavailable({"stderr": "keychain Get failed: keychain not initialized"}))
@@ -740,18 +741,26 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(Path(created["source_dir"]).resolve(), (Path(self.tmp.name) / "source-code").resolve())
         self.assertNotIn(created["project_id"], created["artifact_dir"])
 
-    def test_project_list_status_and_confirmed_delete(self) -> None:
+    def test_current_project_status_and_delete_backup(self) -> None:
         created = create_project(requirement="create audit log", title="audit log", auto_start=False)
         project_id = created["project_id"]
+        Path("source-code/frontend").mkdir(parents=True)
+        Path("source-code/frontend/package.json").write_text("{}", encoding="utf-8")
 
-        self.assertTrue(any(project["id"] == project_id for project in list_projects()))
-        self.assertEqual(get_project_status(project_id)["run"]["project_id"], project_id)
-        with self.assertRaises(Exception):
-            delete_project(project_id, confirm_project_id="wrong-id")
+        self.assertEqual(current_project_status()["run"]["project_id"], project_id)
+        result = delete_current_project()
 
-        result = delete_project(project_id, confirm_project_id=project_id)
         self.assertTrue(result["ok"])
-        self.assertFalse(any(project["id"] == project_id for project in list_projects()))
+        backup = Path(result["backup_path"])
+        self.assertTrue(backup.exists())
+        self.assertFalse(Path(".delivery-workflow").exists())
+        self.assertFalse(Path("delivery-project").exists())
+        self.assertFalse(Path("source-code").exists())
+        self.assertFalse(Path(WORKSPACE_CONFIG_NAME).exists())
+        with zipfile.ZipFile(backup) as archive:
+            self.assertIn("source-code/frontend/package.json", archive.namelist())
+        with self.assertRaises(WorkflowError):
+            current_project_status()
 
     def test_doctor_reports_lark_doc_shape(self) -> None:
         report = doctor()

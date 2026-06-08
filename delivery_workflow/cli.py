@@ -11,13 +11,12 @@ from .lark_events import run_lark_long_connection_consumer
 from .engine import (
     WorkflowError,
     create_project,
-    delete_project,
+    current_project_status,
+    delete_current_project,
     enqueue_step,
-    get_project_status,
     inspect_workflow,
     list_artifacts,
     list_jobs,
-    list_projects,
     read_artifact,
     request_bug_fix,
     retry_prd_approval_lark,
@@ -55,9 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     inspect_p = workflow_sub.add_parser("inspect")
     inspect_p.add_argument("--workflow-id", default="delivery-workflow")
     status_p = workflow_sub.add_parser("status")
-    status_group = status_p.add_mutually_exclusive_group(required=True)
-    status_group.add_argument("--run-id")
-    status_group.add_argument("--project-id")
+    status_p.add_argument("--run-id", required=True)
     enqueue_p = workflow_sub.add_parser("enqueue")
     enqueue_p.add_argument("--run-id", required=True)
     enqueue_p.add_argument("--step-id", required=True)
@@ -81,18 +78,12 @@ def main(argv: list[str] | None = None) -> int:
     create_p.add_argument("--no-requires-frontend", dest="requires_frontend", action="store_false")
     create_p.add_argument("--requires-backend", dest="requires_backend", action="store_true", default=True)
     create_p.add_argument("--no-requires-backend", dest="requires_backend", action="store_false")
-    list_p = project_sub.add_parser("list")
-    list_p.add_argument("--limit", type=int, default=20)
-    project_status_p = project_sub.add_parser("status")
-    project_status_p.add_argument("project_id")
+    project_sub.add_parser("status")
     bugfix_p = project_sub.add_parser("bug-fix")
     bugfix_p.add_argument("--issue", required=True)
-    bugfix_p.add_argument("--project-id")
     bugfix_p.add_argument("--reporter")
     delete_p = project_sub.add_parser("delete")
-    delete_p.add_argument("project_id")
-    delete_p.add_argument("--confirm-project-id", required=True)
-    delete_p.add_argument("--keep-artifacts", action="store_true")
+    delete_p.add_argument("--no-backup", action="store_true")
 
     artifact = sub.add_parser("artifact")
     artifact_sub = artifact.add_subparsers(dest="artifact_command")
@@ -167,8 +158,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             print_json({"ok": True, "workflow": inspect_workflow(args.workflow_id)})
             return 0
         if args.workflow_command == "status":
-            data = status(args.run_id) if args.run_id else get_project_status(args.project_id)
-            print_json({"ok": True, "status": data})
+            print_json({"ok": True, "status": status(args.run_id)})
             return 0
         if args.workflow_command == "enqueue":
             print_json({"ok": True, "job": enqueue_step(args.run_id, args.step_id)})
@@ -201,23 +191,14 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 }
             )
             return 0
-        if args.project_command == "list":
-            print_json({"ok": True, "projects": list_projects(args.limit)})
-            return 0
         if args.project_command == "status":
-            print_json({"ok": True, "status": get_project_status(args.project_id)})
+            print_json({"ok": True, "status": current_project_status()})
             return 0
         if args.project_command == "bug-fix":
-            print_json(request_bug_fix(issue=args.issue, project_id=args.project_id, reporter=args.reporter, source="cli"))
+            print_json(request_bug_fix(issue=args.issue, reporter=args.reporter, source="cli"))
             return 0
         if args.project_command == "delete":
-            print_json(
-                delete_project(
-                    args.project_id,
-                    confirm_project_id=args.confirm_project_id,
-                    delete_artifacts=not args.keep_artifacts,
-                )
-            )
+            print_json(delete_current_project(backup=not args.no_backup))
             return 0
     if args.command == "artifact":
         if args.artifact_command == "list":

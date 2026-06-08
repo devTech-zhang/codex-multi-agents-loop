@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import queue
+import shutil
 import subprocess
 import sys
 import threading
@@ -13,8 +14,8 @@ from typing import Any
 from .capabilities import doctor
 from .config import lark_config, load_config
 from .engine import (
+    _delete_project_records,
     create_project,
-    delete_project,
     execute_step,
     read_artifact,
     status,
@@ -22,6 +23,7 @@ from .engine import (
 )
 from .lark import extract_doc_url
 from .lark_sdk import sdk_preflight
+from .paths import artifact_root
 
 
 @dataclass(frozen=True)
@@ -108,12 +110,14 @@ def run_live_smoke(*, actions: list[str], title_prefix: str, timeout: int, clean
                 return {"ok": False, "stage": action_name, "preflight": preflight, "cases": case_results}
     finally:
         consumer.stop()
-        if cleanup:
-            for project_id in created_project_ids:
-                try:
-                    delete_project(project_id, confirm_project_id=project_id)
-                except Exception as exc:
-                    case_results.append({"ok": False, "stage": "cleanup", "project_id": project_id, "error": str(exc)})
+        if cleanup and created_project_ids:
+            try:
+                for project_id in created_project_ids:
+                    _delete_project_records(project_id)
+                if artifact_root().exists():
+                    shutil.rmtree(artifact_root())
+            except Exception as exc:
+                case_results.append({"ok": False, "stage": "cleanup", "project_ids": created_project_ids, "error": str(exc)})
 
     return {"ok": True, "preflight": preflight, "cases": case_results}
 

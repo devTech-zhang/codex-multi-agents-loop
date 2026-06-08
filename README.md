@@ -27,8 +27,7 @@
 ```bash
 python3 -m delivery_workflow.cli doctor
 python3 -m delivery_workflow.cli project create --requirement "实现一个订单审批后台" --title "订单审批"
-python3 -m delivery_workflow.cli project list
-python3 -m delivery_workflow.cli project status <project_id>
+python3 -m delivery_workflow.cli project status
 python3 -m delivery_workflow.cli worker once
 python3 -m delivery_workflow.cli workflow status --run-id <run_id>
 python3 -m delivery_workflow.cli config show
@@ -57,26 +56,23 @@ python3 -m delivery_workflow.cli workflow submit-gate \
   --data-json '{"approved":true,"approver":"owner","comment":"通过"}'
 ```
 
-删除项目需要二次确认，避免误删：
+删除此项目会彻底清理当前项目的 workflow 状态库、日志、资料目录、源码目录和项目级配置。删除前默认会在当前目录生成 zip 备份：
 
 ```bash
-python3 -m delivery_workflow.cli project delete <project_id> --confirm-project-id <project_id>
+python3 -m delivery_workflow.cli project delete
 ```
 
-删除默认会同时删除当前项目的 `delivery-project` 产物目录；如需保留产物：
+确认不需要备份时，可以显式跳过备份：
 
 ```bash
-python3 -m delivery_workflow.cli project delete <project_id> \
-  --confirm-project-id <project_id> \
-  --keep-artifacts
+python3 -m delivery_workflow.cli project delete --no-backup
 ```
 
 Codex/MCP 触发词建议：
 
 - “新建项目 / 创建交付项目 / 开始一个需求”：`delivery_create_project`
-- “列出所有项目 / 项目列表”：`delivery_list_projects`
-- “查询项目进度 / 查看某项目状态”：`delivery_get_project_status`
-- “删除项目 / 清理项目”：`delivery_delete_project`
+- “查询此项目状态 / 这个项目到哪一步了”：`delivery_get_current_project_status`
+- “删除此项目 / 清理当前项目”：`delivery_delete_current_project`
 - “继续推进 / 跑一下 worker”：`delivery_worker_once`
 - “飞书审批按钮事件 / 处理审批按钮”：创建 PRD 审批卡片时会按 `lark.event.auto_start_consumer` 自动启动长连接消费者；如需排障，再检查 `deliveryflow lark event-consumer` 是否仍在运行。
 - “等待我在飞书审批 / 实时等按钮回调”：`delivery_watch_run`

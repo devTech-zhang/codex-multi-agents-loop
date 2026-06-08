@@ -6,6 +6,7 @@ import re
 import shlex
 import shutil
 import time
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -150,27 +151,27 @@ def get_run(run_id: str) -> dict[str, Any]:
     return run
 
 
-def list_projects(limit: int = 20) -> list[dict[str, Any]]:
-    with connect() as conn:
-        return row_dicts(conn.execute("SELECT * FROM projects ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall())
-
-
-def get_project_status(project_id: str) -> dict[str, Any]:
-    with connect() as conn:
-        run = row_dict(
-            conn.execute(
-                "SELECT * FROM workflow_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-        )
-    if not run:
-        raise WorkflowError(f"project not found or has no workflow run: {project_id}")
+def current_project_status() -> dict[str, Any]:
+    run = _latest_run_for_current_project()
     return status(run["id"])
 
 
-def delete_project(project_id: str, *, confirm_project_id: str, delete_artifacts: bool = True) -> dict[str, Any]:
-    if not project_id or project_id != confirm_project_id:
-        raise WorkflowError("confirm_project_id must exactly match project_id")
+def delete_current_project(*, backup: bool = True) -> dict[str, Any]:
+    run = _latest_run_for_current_project()
+    project_id = run["project_id"]
+    backup_path = _backup_current_project() if backup else None
+    deleted = _delete_project_records(project_id)
+    deleted_paths = _delete_current_project_files()
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "deleted_runs": deleted["run_ids"],
+        "backup_path": str(backup_path) if backup_path else None,
+        "deleted_paths": deleted_paths,
+    }
+
+
+def _delete_project_records(project_id: str) -> dict[str, Any]:
     with connect() as conn:
         project = row_dict(conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone())
         if not project:
@@ -185,18 +186,7 @@ def delete_project(project_id: str, *, confirm_project_id: str, delete_artifacts
             conn.execute("DELETE FROM step_runs WHERE run_id = ?", (run_id,))
         conn.execute("DELETE FROM workflow_runs WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    artifact_dir = artifact_root()
-    artifacts_deleted = False
-    if delete_artifacts and artifact_dir.exists():
-        shutil.rmtree(artifact_dir)
-        artifacts_deleted = True
-    return {
-        "ok": True,
-        "project_id": project_id,
-        "deleted_runs": run_ids,
-        "artifact_dir": str(artifact_dir),
-        "artifacts_deleted": artifacts_deleted,
-    }
+    return {"project": project, "run_ids": run_ids}
 
 
 def request_bug_fix(
@@ -942,6 +932,64 @@ def _latest_run_for_bug_fix(project_id: str | None) -> dict[str, Any]:
     if not run:
         raise WorkflowError("cannot request bug fix before a workflow project exists")
     return run
+
+
+def _latest_run_for_current_project() -> dict[str, Any]:
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM workflow_runs ORDER BY created_at DESC LIMIT 1").fetchone()
+    run = row_dict(row)
+    if not run:
+        raise WorkflowError("current project has no workflow run")
+    return run
+
+
+def _project_owned_paths() -> list[Path]:
+    return [
+        Path.cwd() / WORKSPACE_CONFIG_NAME,
+        Path.cwd() / ".env",
+        artifact_root(),
+        source_root(),
+        Path.cwd() / ".delivery-workflow",
+    ]
+
+
+def _backup_current_project() -> Path:
+    backup_path = _current_project_backup_path()
+    owned_paths = [path for path in _project_owned_paths() if path.exists()]
+    with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in owned_paths:
+            if path.resolve() == backup_path.resolve():
+                continue
+            if path.is_dir():
+                for child in path.rglob("*"):
+                    if child.is_file():
+                        archive.write(child, child.relative_to(Path.cwd()))
+            elif path.is_file():
+                archive.write(path, path.relative_to(Path.cwd()))
+    return backup_path
+
+
+def _current_project_backup_path() -> Path:
+    stem = f"delivery-workflow-backup-{time.strftime('%Y%m%d-%H%M%S')}"
+    backup_path = Path.cwd() / f"{stem}.zip"
+    index = 2
+    while backup_path.exists():
+        backup_path = Path.cwd() / f"{stem}-{index}.zip"
+        index += 1
+    return backup_path
+
+
+def _delete_current_project_files() -> list[str]:
+    deleted: list[str] = []
+    for path in _project_owned_paths():
+        if not path.exists():
+            continue
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        deleted.append(str(path))
+    return deleted
 
 
 def _dev_result_content(

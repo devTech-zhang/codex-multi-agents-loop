@@ -9,12 +9,11 @@ from .config import lark_dry_run, lark_enabled, load_config
 from .engine import (
     WorkflowError,
     create_project,
-    delete_project,
+    current_project_status,
+    delete_current_project,
     enqueue_step,
-    get_project_status,
     inspect_workflow,
     list_artifacts,
-    list_projects,
     read_artifact,
     request_bug_fix,
     retry_prd_approval_lark,
@@ -43,33 +42,21 @@ TOOLS = [
         },
     },
     {
-        "name": "delivery_list_projects",
-        "description": "List delivery projects in the current workspace.",
+        "name": "delivery_get_current_project_status",
+        "description": "Get progress for the current project in this workspace.",
         "inputSchema": {
             "type": "object",
-            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+            "properties": {},
         },
     },
     {
-        "name": "delivery_get_project_status",
-        "description": "Get progress for the latest workflow run of a project.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"project_id": {"type": "string"}},
-            "required": ["project_id"],
-        },
-    },
-    {
-        "name": "delivery_delete_project",
-        "description": "Delete the current delivery project record and, by default, its delivery-project artifacts. Requires exact project_id confirmation.",
+        "name": "delivery_delete_current_project",
+        "description": "Back up the current project to a zip file in this directory, then delete workflow records and workflow-owned project files.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "project_id": {"type": "string"},
-                "confirm_project_id": {"type": "string"},
-                "delete_artifacts": {"type": "boolean"},
+                "backup": {"type": "boolean"},
             },
-            "required": ["project_id", "confirm_project_id"],
         },
     },
     {
@@ -128,7 +115,6 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "issue": {"type": "string"},
-                "project_id": {"type": "string"},
                 "reporter": {"type": "string"},
             },
             "required": ["issue"],
@@ -201,16 +187,10 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
             requires_backend=args.get("requires_backend", True),
         )
         return _maybe_auto_watch_created_project(created)
-    if name == "delivery_list_projects":
-        return list_projects(int(args.get("limit") or 20))
-    if name == "delivery_get_project_status":
-        return get_project_status(args["project_id"])
-    if name == "delivery_delete_project":
-        return delete_project(
-            args["project_id"],
-            confirm_project_id=args["confirm_project_id"],
-            delete_artifacts=args.get("delete_artifacts", True),
-        )
+    if name == "delivery_get_current_project_status":
+        return current_project_status()
+    if name == "delivery_delete_current_project":
+        return delete_current_project(backup=args.get("backup", True))
     if name == "delivery_get_status":
         return status(args["run_id"])
     if name == "delivery_submit_gate":
@@ -235,7 +215,6 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "delivery_request_bug_fix":
         return request_bug_fix(
             issue=args["issue"],
-            project_id=args.get("project_id"),
             reporter=args.get("reporter"),
             source="mcp",
         )
