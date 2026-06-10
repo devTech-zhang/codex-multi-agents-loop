@@ -198,6 +198,7 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         self.assertEqual(command.executor, "claude")
         self.assertEqual(command.command[-1], "-p")
+        self.assertIn("--disable-slash-commands", command.command)
         self.assertIn("--permission-mode", command.command)
         self.assertIn("acceptEdits", command.command)
         self.assertEqual(command.input_text, "请实现这个任务")
@@ -971,16 +972,19 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(output["permissionDecision"], "deny")
         self.assertIn("environment secrets", output["permissionDecisionReason"])
 
-    def test_mcp_config_uses_python_module_entrypoint(self) -> None:
+    def test_mcp_config_uses_portable_wrapper_entrypoint(self) -> None:
         self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
         manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["mcpServers"], "./.codex-plugin/mcp.json")
         config = json.loads((PLUGIN_ROOT / ".codex-plugin" / "mcp.json").read_text(encoding="utf-8"))
         server = config["mcpServers"]["delivery-workflow"]
 
-        self.assertEqual(server["command"], "python3")
-        self.assertEqual(server["args"], ["-m", "delivery_workflow.mcp_server"])
-        self.assertNotIn("scripts/deliveryflow-mcp", json.dumps(server))
+        rendered = json.dumps(server, ensure_ascii=False)
+        self.assertEqual(server["command"], "bash")
+        self.assertIn("scripts/deliveryflow-mcp", rendered)
+        self.assertIn("CLAUDE_PLUGIN_ROOT", rendered)
+        self.assertIn("CODEX_PLUGIN_ROOT", rendered)
+        self.assertNotIn(str(PLUGIN_ROOT), rendered)
 
     def test_mcp_server_uses_newline_delimited_jsonrpc(self) -> None:
         process = subprocess.Popen(

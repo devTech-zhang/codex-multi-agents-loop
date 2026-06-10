@@ -112,7 +112,7 @@ def _default_binary_candidates(platform: str) -> list[str]:
 
 def _default_command_template(platform: str) -> list[str]:
     if platform == "claude-code":
-        return ["{binary}", "--permission-mode", "acceptEdits", "-p"]
+        return ["{binary}", "--disable-slash-commands", "--permission-mode", "acceptEdits", "-p"]
     return ["{binary}", "exec", "--file", "{prompt_path}"]
 
 

@@ -37,6 +37,8 @@ Delivery Workflow 编排需求、PRD、评审、设计、开发、自测、QA、
 
 ## Common Actions
 
+在 Codex / Claude Code 会话中，优先使用 MCP 工具。CLI 命令只作为 MCP 不可用时的人类排障兜底；如果必须通过 Bash 执行创建项目或连续 worker，必须设置足够长的超时时间，不能因 30 秒默认超时而重复创建项目。
+
 | 用户意图 | MCP 工具 | CLI |
 | --- | --- | --- |
 | 初始化项目配置 | `delivery_init_project_config` | `python3 -m delivery_workflow.cli config init` |

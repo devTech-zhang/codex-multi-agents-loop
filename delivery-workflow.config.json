@@ -35,7 +35,7 @@
             },
             "claude-code": {
                 "binary_candidates": ["claude"],
-                "command": ["{binary}", "--permission-mode", "acceptEdits", "-p"],
+                "command": ["{binary}", "--disable-slash-commands", "--permission-mode", "acceptEdits", "-p"],
                 "stdin_from_prompt": true
             }
         }

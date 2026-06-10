@@ -1,8 +1,11 @@
 {
     "mcpServers": {
         "delivery-workflow": {
-            "command": "python3",
-            "args": ["-m", "delivery_workflow.mcp_server"]
+            "command": "bash",
+            "args": [
+                "-lc",
+                "root=\"${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(pwd)}}\"; exec \"$root/scripts/deliveryflow-mcp\""
+            ]
         }
     }
 }
