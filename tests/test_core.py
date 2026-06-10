@@ -149,6 +149,18 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         manifest = json.loads((PLUGIN_ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["agents"], ["./.claude/agents/delivery-workflow.md"])
 
+    def test_host_hook_commands_include_plugin_pythonpath(self) -> None:
+        for rel_path in ("hooks.json", "hooks/hooks.json"):
+            config = json.loads((PLUGIN_ROOT / rel_path).read_text(encoding="utf-8"))
+            rendered = json.dumps(config, ensure_ascii=False)
+            for hook_group in config["hooks"].values():
+                for entry in hook_group:
+                    for hook in entry["hooks"]:
+                        command = hook["command"]
+                        self.assertIn('PYTHONPATH="${CLAUDE_PLUGIN_ROOT}:${PYTHONPATH}"', command)
+                        self.assertIn("python3 -m delivery_workflow.host_hooks", command)
+            self.assertNotIn('"command": "python3 -m delivery_workflow.host_hooks', rendered)
+
     def test_platform_executor_policy(self) -> None:
         self.assertEqual(select_dev_executor("codex"), "codex")
         self.assertEqual(select_dev_executor("claude-code"), "claude")

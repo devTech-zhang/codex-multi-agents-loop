@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m delivery_workflow.host_hooks safety-guard"
+            "command": "PYTHONPATH=\"${CLAUDE_PLUGIN_ROOT}:${PYTHONPATH}\" python3 -m delivery_workflow.host_hooks safety-guard"
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m delivery_workflow.host_hooks record-file-change"
+            "command": "PYTHONPATH=\"${CLAUDE_PLUGIN_ROOT}:${PYTHONPATH}\" python3 -m delivery_workflow.host_hooks record-file-change"
           }
         ]
       },
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m delivery_workflow.host_hooks record-command"
+            "command": "PYTHONPATH=\"${CLAUDE_PLUGIN_ROOT}:${PYTHONPATH}\" python3 -m delivery_workflow.host_hooks record-command"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -m delivery_workflow.host_hooks stop-guard"
+            "command": "PYTHONPATH=\"${CLAUDE_PLUGIN_ROOT}:${PYTHONPATH}\" python3 -m delivery_workflow.host_hooks stop-guard"
           }
         ]
       }
