@@ -980,10 +980,9 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         server = config["mcpServers"]["delivery-workflow"]
 
         rendered = json.dumps(server, ensure_ascii=False)
-        self.assertEqual(server["command"], "bash")
+        self.assertEqual(server["command"], "${CLAUDE_PLUGIN_ROOT}/scripts/deliveryflow-mcp")
         self.assertIn("scripts/deliveryflow-mcp", rendered)
         self.assertIn("CLAUDE_PLUGIN_ROOT", rendered)
-        self.assertIn("CODEX_PLUGIN_ROOT", rendered)
         self.assertNotIn(str(PLUGIN_ROOT), rendered)
 
     def test_mcp_server_uses_newline_delimited_jsonrpc(self) -> None:
