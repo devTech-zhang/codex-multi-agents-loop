@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import subprocess
 import tempfile
@@ -13,13 +14,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from delivery_workflow.capabilities import doctor
-from delivery_workflow.config import DEFAULT_CONFIG_TEMPLATE, PLUGIN_ROOT, WORKSPACE_CONFIG_NAME, load_config
+from delivery_workflow.config import DEFAULT_CONFIG_TEMPLATE, PLUGIN_ROOT, WORKSPACE_CONFIG_NAME, initialize_project_workspace, lark_chat_id, load_config
 from delivery_workflow.definitions import load_workflow
 from delivery_workflow.engine import WorkflowError, create_project, current_project_status, delete_current_project, emit_event, enqueue_step, execute_step, handle_lark_card_event, read_artifact, request_bug_fix, retry_prd_approval_lark, run_worker_once, run_worker_until_blocked, status, submit_gate, watch_run, write_artifact
-from delivery_workflow.engine import _host_escalation_payload, _host_lark_retry_command
+from delivery_workflow.engine import _compose_lark_doc_xml, _compose_prd_v2_lark_markdown, _host_escalation_payload, _host_lark_retry_command
 from delivery_workflow.lark import _is_keychain_unavailable, build_prd_approval_card
 from delivery_workflow.lark_daemon import _code_fingerprint, _terminate_process, ensure_lark_event_consumer
-from delivery_workflow.lark_events import handle_lark_message_event, sdk_event_to_payload
+from delivery_workflow.host_hooks import main as host_hook_main
+from delivery_workflow.lark_events import sdk_event_to_payload
 from delivery_workflow.lark_sdk import load_sdk_credentials, sdk_preflight
 from delivery_workflow.mcp_server import _call_tool as call_mcp_tool
 from delivery_workflow.platforms import build_agent_command, select_dev_executor
@@ -50,9 +52,63 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         config = deepcopy(DEFAULT_CONFIG_TEMPLATE)
         config["lark"]["enabled"] = False
         config["workflow"]["continue_after_gate"] = False
+        env_values: dict[str, str] = {}
+        lark_override = (overrides or {}).get("lark") if isinstance(overrides, dict) else None
+        if isinstance(lark_override, dict):
+            if lark_override.get("chat_id"):
+                env_values["LARK_CHAT_ID"] = str(lark_override["chat_id"])
+            sdk_override = lark_override.get("sdk")
+            if isinstance(sdk_override, dict):
+                if sdk_override.get("app_id"):
+                    env_values["LARK_APP_ID"] = str(sdk_override["app_id"])
+                if sdk_override.get("app_secret"):
+                    env_values["LARK_APP_SECRET"] = str(sdk_override["app_secret"])
         if overrides:
             config = _merge(config, overrides)
         Path(WORKSPACE_CONFIG_NAME).write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+        env_path = Path(".env")
+        if env_values:
+            env_path.write_text("".join(f"{key}={value}\n" for key, value in env_values.items()), encoding="utf-8")
+        elif env_path.exists():
+            env_path.unlink()
+
+    def test_initialize_project_workspace_creates_config_db_and_directories(self) -> None:
+        Path(WORKSPACE_CONFIG_NAME).unlink()
+
+        result = initialize_project_workspace()
+
+        self.assertTrue(Path(result["config_path"]).exists())
+        self.assertTrue(Path(result["db_path"]).exists())
+        self.assertTrue(Path(".delivery-workflow").is_dir())
+        self.assertTrue(Path(".delivery-workflow/logs").is_dir())
+        self.assertTrue(Path("delivery-project").is_dir())
+        self.assertTrue(Path("source-code").is_dir())
+        workflow_log = Path(".delivery-workflow/logs/workflow.log").read_text(encoding="utf-8")
+        self.assertIn("project_workspace.init.started", workflow_log)
+        self.assertIn("project_workspace.init.completed", workflow_log)
+
+    def test_lark_sensitive_values_are_loaded_only_from_env(self) -> None:
+        self.write_config(
+            {
+                "lark": {
+                    "chat_id": "oc_config",
+                    "sdk": {"app_id": "cli_config", "app_secret": "secret_config"},
+                }
+            }
+        )
+        Path(".env").write_text(
+            "LARK_CHAT_ID=oc_env\nLARK_APP_ID=cli_env\nLARK_APP_SECRET=secret_env\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(os.environ, {}, clear=True):
+            config = load_config()
+            credentials = load_sdk_credentials(config)
+
+        self.assertEqual(lark_chat_id(config), "oc_env")
+        self.assertEqual(credentials.app_id, "cli_env")
+        self.assertEqual(credentials.app_secret, "secret_env")
+        self.assertEqual(credentials.source, ".env")
 
     def test_workflow_definition_separates_step_categories(self) -> None:
         workflow = load_workflow()
@@ -70,6 +126,16 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertNotIn("release-approval", steps)
         self.assertEqual(steps["regression-testing"]["next"]["default"], "publish-test-report-doc")
         self.assertEqual(steps["regression-testing"]["next"]["failed"], "bug-fix")
+        self.assertEqual(steps["frontend-tech-design"]["next"]["default"], "backend-tech-design")
+        self.assertEqual(steps["backend-tech-design"]["next"]["default"], "tech-review")
+        self.assertEqual(steps["tech-review"]["next"]["default"], "publish-frontend-tech-doc")
+        self.assertEqual(steps["backend-development"]["next"]["default"], "development-self-test")
+        self.assertEqual(steps["development-self-test"]["next"]["default"], "test-case-design")
+        self.assertIn("development_self_test_report", steps["test-case-design"]["inputs"])
+        self.assertIn("development_self_test_report", steps["regression-testing"]["inputs"])
+        self.assertIn("bug_fix_result", steps["regression-testing"]["inputs"])
+        self.assertIn("test_report", steps["bug-fix"]["inputs"])
+        self.assertIn("bug_fix_result", steps["bug-fix"]["inputs"])
         self.assertNotIn("ui-high-fidelity-design", steps)
         self.assertNotIn("release-approval_gate", steps["final-report"].get("inputs", []))
 
@@ -86,29 +152,28 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
     def test_platform_executor_policy(self) -> None:
         self.assertEqual(select_dev_executor("codex"), "codex")
         self.assertEqual(select_dev_executor("claude-code"), "claude")
-        self.assertEqual(select_dev_executor("opencode"), "opencode")
         self.assertEqual(select_dev_executor("openclaw"), "claude")
         # unknown platform falls back to auto-detect; CI 环境可能没有 claude/codex
         detected = select_dev_executor("something-else")
-        self.assertIn(detected, {"claude", "codex", "opencode"})
+        self.assertIn(detected, {"claude", "codex"})
 
     def test_workspace_config_controls_defaults_and_dev_platforms(self) -> None:
         self.write_config(
             {
                 "workflow": {"auto_start": False},
-                "code_platforms": {"default": "opencode", "frontend": "opencode", "backend": "claude-code"},
+                "code_platforms": {"default": "codex", "frontend": "codex", "backend": "claude-code"},
                 "lark": {"enabled": True, "dry_run": True, "chat_id": "oc_config", "send_step_notifications": False},
             }
         )
 
-        self.assertEqual(load_config()["code_platforms"]["default"], "opencode")
+        self.assertEqual(load_config()["code_platforms"]["default"], "codex")
         created = create_project(requirement="create settings page", title="settings")
         run_id = created["run_id"]
         self.assertEqual(created["execution_policy"]["mode"], "prepared_only")
         self.assertFalse(created["execution_policy"]["enable_agent_cli"])
         context = json.loads(read_artifact(run_id, "project_context")["content"])
-        self.assertEqual(context["platform"], "opencode")
-        self.assertEqual(context["dev_executor"], "opencode")
+        self.assertEqual(context["platform"], "codex")
+        self.assertEqual(context["dev_executor"], "codex")
         self.assertEqual(context["lark_chat_id"], "oc_config")
         self.assertNotIn("auto_run", created)
 
@@ -116,8 +181,13 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         write_artifact(run_id, "frontend_tech_design", "frontend", category="tech", created_by="test")
         write_artifact(run_id, "ui_design_spec", "ui", category="ui", created_by="test")
         result = execute_step(run_id, "frontend-development")
-        self.assertEqual(result["result"]["executor"], "opencode")
-        self.assertTrue(result["result"]["execution"]["command"][0].endswith("opencode"))
+        self.assertEqual(result["result"]["executor"], "codex")
+        self.assertIn("codex", result["result"]["execution"]["command"][0])
+        workflow_log = Path(".delivery-workflow/logs/workflow.log").read_text(encoding="utf-8")
+        self.assertIn("project.create.started", workflow_log)
+        self.assertIn("step.started", workflow_log)
+        self.assertIn("agent.execution", workflow_log)
+        self.assertIn("frontend-development", workflow_log)
 
     def test_claude_code_uses_claude_print_mode(self) -> None:
         self.write_config({"code_platforms": {"enable_agent_cli": False}})
@@ -162,6 +232,23 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         self.assertIn("permission approval", str(context.exception))
 
+    def test_ui_design_spec_prefers_written_design_md_over_stdout_summary(self) -> None:
+        self.write_config({"code_platforms": {"enable_agent_cli": True}})
+        created = create_project(requirement="做 TODO H5", title="TODO H5", auto_start=False)
+        run_id = created["run_id"]
+        write_artifact(run_id, "prd_v2", "# PRD v2\n\n完整需求", category="prd", created_by="test")
+        Path("delivery-project/DESIGN.md").write_text("# DESIGN.md\n\n详尽设计规范正文", encoding="utf-8")
+
+        with patch(
+            "delivery_workflow.engine.maybe_run_command",
+            return_value={"executed": True, "returncode": 0, "stdout": "# Summary\n\n只是一段摘要", "stderr": "", "command": ["claude", "-p"]},
+        ):
+            execute_step(run_id, "ui-design-spec")
+
+        content = read_artifact(run_id, "ui_design_spec")["content"]
+        self.assertIn("详尽设计规范正文", content)
+        self.assertNotIn("只是一段摘要", content)
+
     def test_gate_and_worker_progress_to_prd_approval(self) -> None:
         created = create_project(requirement="新增后台 order approval 功能", title="order approval")
         run_id = created["run_id"]
@@ -195,7 +282,15 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         prd_doc_markdown = read_artifact(run_id, "prd_v2_lark_markdown")["content"]
         for heading in ("版本变化表格", "各 Agent 评审意见汇总", "相比 v1 变更点", "未采纳意见", "最终完整 PRD 内容"):
             self.assertIn(heading, prd_doc_markdown)
-        self.assertIn("# 客户退款审批PRD", "\n".join(prd_doc["result"]["command"]))
+        self.assertIn("| 版本 | 来源 | 主要变化 |\n| --- | --- | --- |\n| v1", prd_doc_markdown)
+        prd_doc_xml = read_artifact(run_id, "prd_v2_lark_xml")["content"]
+        self.assertIn("<title>客户退款审批PRD</title>", prd_doc_xml)
+        self.assertIn("<table>", prd_doc_xml)
+        self.assertIn("<th background-color=\"light-gray\">版本</th>", prd_doc_xml)
+        self.assertIn("<h1>各 Agent 评审意见汇总</h1>", prd_doc_xml)
+        command_text = "\n".join(prd_doc["result"]["command"])
+        self.assertIn("<title>客户退款审批PRD</title>", command_text)
+        self.assertNotIn("--doc-format\nmarkdown", command_text)
 
         card = json.loads(read_artifact(run_id, "prd_approval_card_message")["content"])
         command = card["result"]["command"]
@@ -212,6 +307,32 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertIn(created["run_id"], rendered)
         lark_payload = created["auto_run"]["results"][-1]["result"]["gate"]["lark"]
         self.assertEqual(lark_payload["listener"]["reason"], "lark dry_run is true")
+
+    def test_prd_v2_lark_markdown_normalizes_table_and_review_heading(self) -> None:
+        created = create_project(requirement="做 TODO H5", title="TODO H5", auto_start=False)
+        run_id = created["run_id"]
+        write_artifact(run_id, "prd_v1", "# TODO H5 PRD\n\nv1", category="prd", created_by="test")
+        write_artifact(
+            run_id,
+            "requirement_review_report",
+            "# 多角色需求评审报告\n\n- 产品：补充空状态。\n- QA：补充验收标准。",
+            category="review",
+            created_by="test",
+        )
+
+        markdown = _compose_prd_v2_lark_markdown(run_id, "# TODO H5 PRD\n\n## 未采纳意见\n\n无")
+
+        self.assertIn("| 版本 | 来源 | 主要变化 |\n| --- | --- | --- |\n| v1", markdown)
+        review_section = markdown.split("## 各 Agent 评审意见汇总", 1)[1].split("## 相比 v1 变更点", 1)[0]
+        self.assertNotIn("多角色需求评审报告", review_section)
+        self.assertIn("产品：补充空状态", review_section)
+
+    def test_generic_lark_doc_xml_has_title_and_table(self) -> None:
+        xml = _compose_lark_doc_xml("TODO H5 项目 UI 设计规范", "# DESIGN.md\n\n| 项 | 值 |\n| --- | --- |\n| 色彩 | 暖色 |")
+
+        self.assertIn("<title>TODO H5 项目 UI 设计规范</title>", xml)
+        self.assertIn("<table>", xml)
+        self.assertIn("<td>色彩</td>", xml)
 
     def test_prd_approval_card_uses_legacy_compatible_shape(self) -> None:
         card = build_prd_approval_card(
@@ -457,7 +578,11 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         final_doc = json.loads(read_artifact(run_id, "final_report_lark_doc")["content"])
         command = final_doc["command"]
-        self.assertIn("# 客户退款审批最终交付报告", "\n".join(command))
+        command_text = "\n".join(command)
+        self.assertIn("<title>客户退款审批最终交付报告</title>", command_text)
+        self.assertIn("--doc-format\nxml", command_text)
+        final_doc_xml = read_artifact(run_id, "final_report_lark_doc_xml")["content"]
+        self.assertIn("<title>客户退款审批最终交付报告</title>", final_doc_xml)
         with connect() as conn:
             notice = conn.execute(
                 "SELECT * FROM events WHERE run_id = ? AND event_type = 'lark.notify.sent' AND message LIKE ?",
@@ -476,6 +601,49 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertFalse(result["result"]["quality_gate"]["passed"])
         self.assertEqual(result["next_step"], "bug-fix")
 
+    def test_qa_bugfix_regression_loop_hands_reports_between_steps(self) -> None:
+        self.write_config({"code_platforms": {"enable_agent_cli": True}})
+        created = create_project(requirement="create todo h5", title="todo h5", auto_start=False)
+        run_id = created["run_id"]
+        for name, category in [
+            ("prd_v2", "prd"),
+            ("ui_design_spec", "ui"),
+            ("frontend_tech_design", "tech"),
+            ("backend_tech_design", "tech"),
+            ("test_cases", "test"),
+            ("development_self_test_report", "dev-result"),
+            ("frontend_dev_result", "dev-result"),
+            ("backend_dev_result", "dev-result"),
+        ]:
+            write_artifact(run_id, name, f"{name} content", category=category, created_by="test")
+
+        qa_fail_report = json.dumps(
+            {
+                "bugs": [{"id": "BUG-1", "severity": "critical", "steps": "open page"}],
+                "quality_gate": {"bug_counts": {"block": 0, "critical": 1, "major": 0, "minor": 0}},
+            },
+            ensure_ascii=False,
+        )
+        with patch("delivery_workflow.engine.maybe_run_command", return_value={"executed": True, "returncode": 0, "stdout": qa_fail_report, "stderr": "", "command": ["qa"]}):
+            first_qa = execute_step(run_id, "regression-testing")
+
+        self.assertEqual(first_qa["next_step"], "bug-fix")
+        self.assertIn("BUG-1", read_artifact(run_id, "test_report")["content"])
+
+        fix_report = "# 修复报告\n\nfixed_bugs: BUG-1\ncommands_run: npm run build, npm test\nself_test_result: pass"
+        with patch("delivery_workflow.engine.maybe_run_command", return_value={"executed": True, "returncode": 0, "stdout": fix_report, "stderr": "", "command": ["fix"]}):
+            fix = execute_step(run_id, "bug-fix")
+
+        self.assertEqual(fix["next_step"], "regression-testing")
+        self.assertIn("BUG-1", read_artifact(run_id, "bug_fix_result")["content"])
+
+        qa_pass_report = json.dumps({"quality_gate": {"bug_counts": {"block": 0, "critical": 0, "major": 0, "minor": 0}}, "regression_verified": ["BUG-1"]}, ensure_ascii=False)
+        with patch("delivery_workflow.engine.maybe_run_command", return_value={"executed": True, "returncode": 0, "stdout": qa_pass_report, "stderr": "", "command": ["qa"]}):
+            second_qa = execute_step(run_id, "regression-testing")
+
+        self.assertEqual(second_qa["next_step"], "publish-test-report-doc")
+        self.assertIn("BUG-1", read_artifact(run_id, "test_report")["content"])
+
     def test_regression_testing_requires_real_execution(self) -> None:
         self.write_config({"code_platforms": {"enable_agent_cli": False}})
         created = create_project(requirement="create todo h5", title="todo h5", auto_start=False)
@@ -484,6 +652,26 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
             execute_step(created["run_id"], "regression-testing")
 
         self.assertIn("requires real QA execution", str(context.exception))
+
+    def test_dev_step_blocks_when_self_test_was_not_run(self) -> None:
+        self.write_config({"code_platforms": {"enable_agent_cli": True}})
+        created = create_project(requirement="create todo h5", title="todo h5", auto_start=False)
+        run_id = created["run_id"]
+        write_artifact(run_id, "prd_v2", "prd", category="prd", created_by="test")
+        write_artifact(run_id, "dev_tasks", "tasks", category="dev", created_by="test")
+        write_artifact(run_id, "frontend_tech_design", "frontend tech", category="tech", created_by="test")
+        write_artifact(run_id, "ui_design_spec", "ui", category="ui", created_by="test")
+
+        with (
+            patch(
+                "delivery_workflow.engine.maybe_run_command",
+                return_value={"executed": True, "returncode": 0, "stdout": "实现已完成，但暂未运行 npm install / npm run build。", "stderr": "", "command": ["claude"]},
+            ),
+            self.assertRaises(WorkflowError) as context,
+        ):
+            execute_step(run_id, "frontend-development")
+
+        self.assertIn("did not complete required self-test", str(context.exception))
 
     def test_manual_bug_fix_request_enqueues_bug_fix_step(self) -> None:
         created = create_project(requirement="create todo h5", title="todo h5", auto_start=False)
@@ -516,16 +704,18 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         self.assertEqual(payload["event"]["action"]["value"]["action"], "approve_prd")
 
-    def test_lark_sdk_credentials_can_use_single_config_explicit_values(self) -> None:
-        self.write_config({"lark": {"sdk": {"app_id": "cli_test", "app_secret": "secret_test"}}})
-        credentials = load_sdk_credentials(load_config())
+    def test_lark_sdk_credentials_can_use_env_values(self) -> None:
+        Path(".env").write_text("LARK_APP_ID=cli_test\nLARK_APP_SECRET=secret_test\n", encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True):
+            credentials = load_sdk_credentials(load_config())
 
         self.assertEqual(credentials.app_id, "cli_test")
-        self.assertEqual(credentials.source, "workflow.config.json")
+        self.assertEqual(credentials.source, ".env")
 
     def test_lark_sdk_preflight_reports_package_and_websocket_event(self) -> None:
-        self.write_config({"lark": {"sdk": {"app_id": "cli_test", "app_secret": "secret_test"}}})
-        report = sdk_preflight(load_config())
+        Path(".env").write_text("LARK_APP_ID=cli_test\nLARK_APP_SECRET=secret_test\n", encoding="utf-8")
+        with patch.dict(os.environ, {}, clear=True):
+            report = sdk_preflight(load_config())
 
         self.assertEqual(report["event"], "card.action.trigger")
         self.assertEqual(report["transport"], "sdk_websocket")
@@ -697,26 +887,6 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         kill.assert_not_called()
 
-    def test_lark_message_event_can_create_project_from_group_command(self) -> None:
-        self.write_config({"lark": {"enabled": True, "dry_run": True, "send_step_notifications": False, "chat_id": "oc_test"}})
-
-        result = handle_lark_message_event(
-            {
-                "event": {
-                    "sender": {"sender_id": {"open_id": "ou_test"}},
-                    "message": {
-                        "message_id": "om_test",
-                        "chat_id": "oc_test",
-                        "content": json.dumps({"text": "@_user_1 新建项目：TODO H5 应用，支持新增、完成和删除待办。"}, ensure_ascii=False),
-                    },
-                }
-            }
-        )
-
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["stage"], "bot_command_project_created")
-        self.assertEqual(current_project_status()["run"]["project_id"], result["project"]["project_id"])
-
     def test_lark_keychain_failure_detection_and_retry_entrypoint(self) -> None:
         self.assertTrue(_is_keychain_unavailable({"stderr": "keychain Get failed: keychain not initialized"}))
         self.write_config({"lark": {"enabled": True, "dry_run": True, "send_step_notifications": False, "chat_id": "oc_test"}})
@@ -773,6 +943,45 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertIn("auth login --recommend", rendered)
         self.assertNotIn("npm install -g", rendered)
 
+    def test_host_hooks_record_command_evidence(self) -> None:
+        payload = {"tool_name": "Bash", "tool_input": {"command": "npm run build"}, "session_id": "sess_test"}
+
+        with patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            exit_code = host_hook_main(["record-command"])
+
+        self.assertEqual(exit_code, 0)
+        hook_log = Path(".delivery-workflow/logs/host-hooks.jsonl").read_text(encoding="utf-8")
+        self.assertIn("host_hook.command_executed", hook_log)
+        self.assertIn("node-verification", hook_log)
+        workflow_log = Path(".delivery-workflow/logs/workflow.log").read_text(encoding="utf-8")
+        self.assertIn("host_hook.command_executed", workflow_log)
+
+    def test_host_hook_safety_guard_blocks_secret_reads(self) -> None:
+        payload = {"tool_name": "Bash", "tool_input": {"command": "cat .env"}}
+
+        with (
+            patch("sys.stdin", io.StringIO(json.dumps(payload))),
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            exit_code = host_hook_main(["safety-guard"])
+
+        self.assertEqual(exit_code, 0)
+        decision = json.loads(stdout.getvalue())
+        output = decision["hookSpecificOutput"]
+        self.assertEqual(output["permissionDecision"], "deny")
+        self.assertIn("environment secrets", output["permissionDecisionReason"])
+
+    def test_mcp_config_uses_python_module_entrypoint(self) -> None:
+        self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
+        manifest = json.loads((PLUGIN_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["mcpServers"], "./.codex-plugin/mcp.json")
+        config = json.loads((PLUGIN_ROOT / ".codex-plugin" / "mcp.json").read_text(encoding="utf-8"))
+        server = config["mcpServers"]["delivery-workflow"]
+
+        self.assertEqual(server["command"], "python3")
+        self.assertEqual(server["args"], ["-m", "delivery_workflow.mcp_server"])
+        self.assertNotIn("scripts/deliveryflow-mcp", json.dumps(server))
+
     def test_mcp_server_uses_newline_delimited_jsonrpc(self) -> None:
         process = subprocess.Popen(
             [str(PLUGIN_ROOT / "scripts" / "deliveryflow-mcp")],
@@ -807,6 +1016,7 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(json.loads(first)["result"]["serverInfo"]["name"], "delivery-workflow")
         tools = json.loads(second)["result"]["tools"]
         self.assertTrue(any(tool["name"] == "delivery_create_project" for tool in tools))
+        self.assertTrue(any(tool["name"] == "delivery_init_project_config" for tool in tools))
         self.assertTrue(any(tool["name"] == "delivery_watch_run" for tool in tools))
 
     def test_mcp_cannot_submit_approval_gates(self) -> None:

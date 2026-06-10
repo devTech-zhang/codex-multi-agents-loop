@@ -22,8 +22,6 @@ def select_dev_executor(platform: str) -> str:
     normalized = normalize_platform(platform)
     if normalized == "codex":
         return "codex"
-    if normalized == "opencode":
-        return "opencode"
     if normalized in {"claude-code", "openclaw"}:
         return "claude"
     return "codex"
@@ -82,8 +80,15 @@ def execution_needs_permission(execution: dict[str, Any]) -> bool:
         "等待写入审批",
         "审批写入",
         "需要你的审批",
+        "需要您批准",
+        "需要批准",
+        "请批准",
         "need your approval to write",
         "i need your approval to write",
+        "requires your approval",
+        "need your approval",
+        "awaiting user approval",
+        "awaiting approval",
         "after approval",
         "waiting for approval",
         "permission denied",

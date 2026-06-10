@@ -11,7 +11,14 @@ def lark_available() -> bool:
     return shutil.which("lark-cli") is not None
 
 
-def create_doc_as_bot(title: str, markdown: str, *, identity: str = "bot", dry_run: bool = False) -> dict[str, Any]:
+def create_doc_as_bot(
+    title: str,
+    content: str,
+    *,
+    identity: str = "bot",
+    dry_run: bool = False,
+    doc_format: str = "markdown",
+) -> dict[str, Any]:
     command = [
         "lark-cli",
         "docs",
@@ -20,11 +27,11 @@ def create_doc_as_bot(title: str, markdown: str, *, identity: str = "bot", dry_r
         identity,
         "--api-version",
         "v2",
-        "--doc-format",
-        "markdown",
-        "--content",
-        f"# {title}\n\n{markdown}",
     ]
+    if doc_format == "markdown":
+        command.extend(["--doc-format", "markdown", "--content", f"# {title}\n\n{content}"])
+    else:
+        command.extend(["--doc-format", doc_format, "--content", content])
     return _run_json(command, timeout=120, dry_run=dry_run)
 
 

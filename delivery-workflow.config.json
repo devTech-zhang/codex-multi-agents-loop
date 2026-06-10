@@ -37,17 +37,12 @@
                 "binary_candidates": ["claude"],
                 "command": ["{binary}", "--permission-mode", "acceptEdits", "-p"],
                 "stdin_from_prompt": true
-            },
-            "opencode": {
-                "binary_candidates": ["opencode"],
-                "command": ["{binary}", "run", "--file", "{prompt_path}"]
             }
         }
     },
     "lark": {
         "enabled": true,
         "identity": "bot",
-        "chat_id": "",
         "dry_run": false,
         "send_step_notifications": true,
         "send_prd_approval_card": true,
@@ -60,16 +55,11 @@
         "sdk": {
             "credential_source": "lark-cli",
             "profile": "",
-            "app_id": "",
-            "app_secret": "",
             "log_level": "info"
         },
         "event": {
             "transport": "sdk_websocket",
             "auto_start_consumer": true
-        },
-        "bot_commands": {
-            "enabled": true
         }
     }
 }

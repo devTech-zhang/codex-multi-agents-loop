@@ -1,0 +1,8 @@
+{
+    "mcpServers": {
+        "delivery-workflow": {
+            "command": "python3",
+            "args": ["-m", "delivery_workflow.mcp_server"]
+        }
+    }
+}

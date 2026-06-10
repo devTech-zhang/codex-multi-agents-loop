@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 from .capabilities import doctor, install_lark_cli
-from .config import config_sources, load_config, write_workspace_config
+from .config import config_sources, initialize_project_workspace, load_config
 from .lark_events import run_lark_long_connection_consumer
 from .engine import (
     WorkflowError,
@@ -147,8 +147,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             print_json({"ok": True, "sources": config_sources(), "config": load_config()})
             return 0
         if args.config_command == "init":
-            path = write_workspace_config(overwrite=args.overwrite)
-            print_json({"ok": True, "path": str(path)})
+            print_json({"ok": True, "project": initialize_project_workspace(overwrite_config=args.overwrite)})
             return 0
     if args.command == "workflow":
         if args.workflow_command == "list":

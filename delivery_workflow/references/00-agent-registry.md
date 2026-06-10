@@ -1,6 +1,6 @@
 # Delivery Workflow Agent Registry
 
-本文件是 Codex、Claude Code、OpenCode 共用的 Agent 角色唯一说明源。平台适配层只能引用本文件，不要在 `.claude/agents/`、Codex skill 或 README 中复制整套角色定义。
+本文件是 Codex、Claude Code 共用的 Agent 角色唯一说明源。平台适配层只能引用本文件，不要在 `.claude/agents/`、Codex skill 或 README 中复制整套角色定义。
 
 ## 通用边界
 
@@ -9,7 +9,8 @@
 - `code_platforms.enable_agent_cli=false` 时，只生成任务包和结构化产物，不接管业务项目代码实现。
 - 每个步骤只读取 workflow 声明的输入 artifact，只产出当前步骤声明的输出 artifact。
 - PRD 被拒绝后，`product_manager` 在 `review-summary` 中读取 `prd-approval_gate.comment`，据此修订 PRD v2，不回退到 `prd-v1` 重新确认需求。
-- 前后端、QA 和 Bug 修复阶段必须执行真实自测；不能把未执行的任务包描述为已完成。
+- 前后端、开发自测、QA 和 Bug 修复阶段必须执行真实命令；不能把未执行的任务包描述为已完成。
+- QA 测试报告必须作为开发修复输入，开发修复报告必须作为 QA 回归输入；`regression-testing → bug-fix → regression-testing` 会循环到 bug 等级和数量满足质量门禁。
 
 ## 角色表
 
@@ -74,18 +75,20 @@
 
 ### qa_engineer
 
-负责 `test-case-design` 和回归测试判级要求。
+负责 `test-case-design` 和系统/回归测试判级要求。
 
-- 基于 PRD v2 和开发结果设计测试用例。
+- 基于 PRD v2、开发结果和开发自测报告设计测试用例。
 - 覆盖主流程、边界、异常、权限、兼容性和回归范围。
 - 输出可执行的测试清单和验收标准。
 - Web 项目必须优先设计 Playwright 或等价浏览器自动化测试。
 - 按 Block、Critical、Major、Minor 判定 bug 等级，并服务 workflow 准出标准。
+- 第一轮执行系统测试；后续读取开发修复报告逐条回归，并在测试报告中给出是否准出。
 
 ### bug_fix_engineer
 
 负责 `bug-fix`。
 
 - 根据真人用户反馈或 QA 测试报告修复真实问题。
-- 必须读取最终 PRD、UI 规范、前后端方案、测试用例、测试报告和开发结果。
+- 必须读取最终 PRD、UI 规范、前后端方案、开发自测报告、测试用例、测试报告、上一轮修复报告和开发结果。
 - 保持最小改动，先复现再修复，修复后执行自测并说明剩余风险。
+- 修复报告必须列出对应 QA bug 编号、根因、修改文件、自测命令和回归建议，供 QA 下一轮回归。

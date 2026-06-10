@@ -115,16 +115,6 @@
       "ref": "references/08-frontend-tech-design.md",
       "inputs": ["prd_v2", "ui_design_spec"],
       "outputs": ["frontend_tech_design"],
-      "next": {"default": "publish-frontend-tech-doc"}
-    },
-    {
-      "id": "publish-frontend-tech-doc",
-      "name": "发布飞书前端技术方案文档",
-      "category": "automated",
-      "executor": "lark-doc",
-      "source_artifact": "frontend_tech_design",
-      "output_artifact": "frontend_tech_design_lark_doc",
-      "title_template": "{project_title} 项目前端技术方案",
       "next": {"default": "backend-tech-design"}
     },
     {
@@ -137,16 +127,6 @@
       "ref": "references/09-backend-tech-design.md",
       "inputs": ["prd_v2"],
       "outputs": ["backend_tech_design"],
-      "next": {"default": "publish-backend-tech-doc"}
-    },
-    {
-      "id": "publish-backend-tech-doc",
-      "name": "发布飞书服务端设计方案文档",
-      "category": "automated",
-      "executor": "lark-doc",
-      "source_artifact": "backend_tech_design",
-      "output_artifact": "backend_tech_design_lark_doc",
-      "title_template": "{project_title} 项目服务端设计方案",
       "next": {"default": "tech-review"}
     },
     {
@@ -159,6 +139,28 @@
       "ref": "references/10-tech-review.md",
       "inputs": ["frontend_tech_design", "backend_tech_design"],
       "outputs": ["tech_review_report"],
+      "next": {"default": "publish-frontend-tech-doc"}
+    },
+    {
+      "id": "publish-frontend-tech-doc",
+      "name": "发布飞书前端技术方案文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "frontend_tech_design",
+      "output_artifact": "frontend_tech_design_lark_doc",
+      "title_template": "{project_title} 项目前端技术方案",
+      "include_artifacts": ["tech_review_report"],
+      "next": {"default": "publish-backend-tech-doc"}
+    },
+    {
+      "id": "publish-backend-tech-doc",
+      "name": "发布飞书服务端设计方案文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "backend_tech_design",
+      "output_artifact": "backend_tech_design_lark_doc",
+      "title_template": "{project_title} 项目服务端设计方案",
+      "include_artifacts": ["tech_review_report"],
       "next": {"default": "dev-task-breakdown"}
     },
     {
@@ -201,6 +203,16 @@
       "ref": "references/14-backend-development.md",
       "inputs": ["dev_tasks", "backend_tech_design"],
       "outputs": ["backend_dev_result"],
+      "next": {"default": "development-self-test"}
+    },
+    {
+      "id": "development-self-test",
+      "name": "开发自测",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/15-development-self-test.md",
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "dev_tasks", "frontend_dev_result", "backend_dev_result"],
+      "outputs": ["development_self_test_report"],
       "next": {"default": "test-case-design"}
     },
     {
@@ -211,7 +223,7 @@
       "agent": "qa_engineer",
       "artifact_category": "test",
       "ref": "references/15-test-case-design.md",
-      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result"],
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "development_self_test_report"],
       "outputs": ["test_cases"],
       "next": {"default": "publish-test-cases-doc"}
     },
@@ -231,7 +243,7 @@
       "category": "automated",
       "executor": "dev-runner",
       "ref": "references/16-regression-testing.md",
-      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "development_self_test_report", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
       "outputs": ["test_report"],
       "next": {"default": "publish-test-report-doc", "failed": "bug-fix"}
     },
@@ -251,7 +263,7 @@
       "category": "automated",
       "executor": "dev-runner",
       "ref": "references/17-bug-fix.md",
-      "inputs": ["manual_bug_fix_request", "prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "test_report", "frontend_dev_result", "backend_dev_result"],
+      "inputs": ["manual_bug_fix_request", "prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "development_self_test_report", "test_report", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
       "outputs": ["bug_fix_result"],
       "next": {"default": "regression-testing"}
     },
@@ -263,7 +275,7 @@
       "agent": "delivery_manager",
       "artifact_category": "release",
       "ref": "references/18-final-report.md",
-      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "test_report"],
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "development_self_test_report", "test_report", "bug_fix_result"],
       "outputs": ["final_delivery_report"],
       "next": {"default": "publish-final-report-doc"}
     },

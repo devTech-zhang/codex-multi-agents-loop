@@ -8,6 +8,7 @@ import shutil
 import time
 import zipfile
 from contextlib import contextmanager
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from .paths import DEFAULT_WORKFLOW_ID, PLUGIN_ROOT, artifact_root, source_root
 from .platforms import build_agent_command, execution_needs_permission, maybe_run_command, select_dev_executor
 from .storage import connect, new_id, now_iso, row_dict, row_dicts
 from .worker_daemon import start_worker_continuation
+from .workflow_log import log_workflow
 
 
 class WorkflowError(RuntimeError):
@@ -43,6 +45,11 @@ def create_project(
 ) -> dict[str, Any]:
     _ensure_project_workspace_files()
     config = load_config()
+    log_workflow(
+        "project.create.started",
+        "开始创建交付项目。",
+        payload={"title": title, "source": source, "workflow_id": workflow_id, "requires_frontend": requires_frontend, "requires_backend": requires_backend},
+    )
     platform = code_platform_for_step(config, fallback=platform)
     if lark_chat_id is None:
         lark_chat_id = config_lark_chat_id(config)
@@ -75,6 +82,13 @@ def create_project(
             """,
             (run_id, project_id, workflow_id, start_step, "running", ts, ts),
         )
+    log_workflow(
+        "project.create.records_created",
+        "项目和 workflow run 记录已创建。",
+        run_id=run_id,
+        project_id=project_id,
+        payload={"title": project_title, "platform": platform, "start_step": start_step},
+    )
     write_artifact(run_id, "raw_requirement", requirement, category="raw", created_by="workflow")
     write_artifact(
         run_id,
@@ -138,6 +152,13 @@ def create_project(
     }
     if auto_run_result is not None:
         result["auto_run"] = auto_run_result
+    log_workflow(
+        "project.create.completed",
+        "交付项目创建完成。",
+        run_id=run_id,
+        project_id=project_id,
+        payload={"auto_start": auto_start, "auto_run_to_gate": auto_run_to_gate, "result": result},
+    )
     return result
 
 
@@ -159,16 +180,24 @@ def current_project_status() -> dict[str, Any]:
 def delete_current_project(*, backup: bool = True) -> dict[str, Any]:
     run = _latest_run_for_current_project()
     project_id = run["project_id"]
+    log_workflow("project.delete.started", "开始删除当前项目。", run_id=run["id"], project_id=project_id, payload={"backup": backup})
     backup_path = _backup_current_project() if backup else None
     deleted = _delete_project_records(project_id)
+    log_workflow(
+        "project.delete.records_deleted",
+        "当前项目数据库记录已删除，即将清理项目文件。",
+        project_id=project_id,
+        payload={"deleted_runs": deleted["run_ids"], "backup_path": str(backup_path) if backup_path else None},
+    )
     deleted_paths = _delete_current_project_files()
-    return {
+    result = {
         "ok": True,
         "project_id": project_id,
         "deleted_runs": deleted["run_ids"],
         "backup_path": str(backup_path) if backup_path else None,
         "deleted_paths": deleted_paths,
     }
+    return result
 
 
 def _delete_project_records(project_id: str) -> dict[str, Any]:
@@ -200,6 +229,7 @@ def request_bug_fix(
     if not issue:
         raise WorkflowError("bug fix issue cannot be empty")
     run = _latest_run_for_bug_fix(project_id)
+    log_workflow("bug_fix.request.started", "开始处理人工修复问题请求。", run_id=run["id"], project_id=run["project_id"], payload={"issue": issue, "source": source, "reporter": reporter})
     artifact = write_artifact(
         run["id"],
         "manual_bug_fix_request",
@@ -248,6 +278,7 @@ def enqueue_step(run_id: str, step_id: str, payload: dict[str, Any] | None = Non
             (run_id, step_id),
         ).fetchone()
         if existing:
+            log_workflow("job.enqueue.skipped_existing", "已有 pending/running job，跳过重复入队。", run_id=run_id, step_id=step_id, payload={"job_id": existing["id"]})
             return dict(existing)
         conn.execute(
             """
@@ -257,6 +288,7 @@ def enqueue_step(run_id: str, step_id: str, payload: dict[str, Any] | None = Non
             (job_id, run_id, step_id, step["executor"], "pending", json.dumps(payload or {}, ensure_ascii=False), ts, ts),
         )
     emit_event(run_id, "job.enqueued", f"step {step_id} enqueued", {"job_id": job_id})
+    log_workflow("job.enqueued", "Workflow step 已入队。", run_id=run_id, step_id=step_id, payload={"job_id": job_id, "payload": payload or {}})
     return {"id": job_id, "run_id": run_id, "step_id": step_id, "status": "pending"}
 
 
@@ -270,6 +302,7 @@ def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
         else:
             row = conn.execute("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1").fetchone()
         if not row:
+            log_workflow("worker.idle", "Worker 没有发现 pending job。", run_id=run_id)
             return {"ok": True, "idle": True}
         job = dict(row)
         ts = now_iso()
@@ -277,6 +310,7 @@ def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
             "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?, updated_at = ? WHERE id = ?",
             (ts, ts, job["id"]),
         )
+    log_workflow("worker.job.started", "Worker 开始执行 job。", run_id=job["run_id"], step_id=job["step_id"], payload={"job_id": job["id"]})
     try:
         result = execute_step(job["run_id"], job["step_id"], json.loads(job.get("payload_json") or "{}"))
         with connect() as conn:
@@ -285,6 +319,7 @@ def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
                 "UPDATE jobs SET status = 'done', result_json = ?, finished_at = ?, updated_at = ? WHERE id = ?",
                 (json.dumps(result, ensure_ascii=False), ts, ts, job["id"]),
             )
+        log_workflow("worker.job.completed", "Worker job 执行完成。", run_id=job["run_id"], step_id=job["step_id"], payload={"job_id": job["id"], "result": result})
         return {"ok": True, "job_id": job["id"], "result": result}
     except Exception as exc:
         with connect() as conn:
@@ -294,6 +329,7 @@ def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
                 (str(exc), ts, ts, job["id"]),
             )
         emit_event(job["run_id"], "job.failed", str(exc), {"job_id": job["id"], "step_id": job["step_id"]})
+        log_workflow("worker.job.failed", "Worker job 执行失败。", run_id=job["run_id"], step_id=job["step_id"], payload={"job_id": job["id"], "error": str(exc)}, level="error")
         return {"ok": False, "job_id": job["id"], "error": str(exc)}
 
 
@@ -304,6 +340,7 @@ def run_worker_until_blocked(
     stop_steps: set[str] | None = None,
 ) -> dict[str, Any]:
     stop_steps = stop_steps or set()
+    log_workflow("worker.loop.started", "Worker 连续推进开始。", run_id=run_id, payload={"max_jobs": max_jobs, "stop_steps": sorted(stop_steps)})
     results: list[dict[str, Any]] = []
     for _ in range(max_jobs):
         current_status = status(run_id) if run_id else None
@@ -315,15 +352,23 @@ def run_worker_until_blocked(
         item = run_worker_once(run_id=run_id)
         results.append(item)
         if not item.get("ok"):
-            return {"ok": False, "stopped": "failed", "results": results}
+            result = {"ok": False, "stopped": "failed", "results": results}
+            log_workflow("worker.loop.completed", "Worker 连续推进因失败停止。", run_id=run_id, payload=result, level="error")
+            return result
         if item.get("idle"):
-            return {"ok": True, "stopped": "idle", "results": results}
+            result = {"ok": True, "stopped": "idle", "results": results}
+            log_workflow("worker.loop.completed", "Worker 连续推进因空闲停止。", run_id=run_id, payload=result)
+            return result
         result = item.get("result") or {}
         if result.get("blocked"):
-            return {"ok": True, "stopped": "blocked", "results": results}
+            final = {"ok": True, "stopped": "blocked", "results": results}
+            log_workflow("worker.loop.completed", "Worker 连续推进到阻塞 Gate。", run_id=run_id, payload=final)
+            return final
         if result.get("step_id") in stop_steps:
             break
-    return {"ok": True, "stopped": "limit_or_stop_step", "results": results}
+    final = {"ok": True, "stopped": "limit_or_stop_step", "results": results}
+    log_workflow("worker.loop.completed", "Worker 连续推进到达限制或 stop step。", run_id=run_id, payload=final)
+    return final
 
 
 def execute_step(run_id: str, step_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -331,33 +376,41 @@ def execute_step(run_id: str, step_id: str, payload: dict[str, Any] | None = Non
     run = get_run(run_id)
     definition = load_workflow(run["workflow_id"])
     step = definition.step(step_id)
-    _mark_step(run_id, step, "running", payload)
-    _notify_step(run, step, "started", payload)
-    executor = step["executor"]
-    if executor == "gate":
-        result = _open_gate(run_id, step)
-        _mark_step(run_id, step, "blocked", result)
-        _notify_step(run, step, "blocked", result)
-        return result
-    if executor == "agent":
-        result = _run_agent_step(run, definition, step)
-    elif executor == "validator":
-        result = _run_validator(run_id, step)
-    elif executor == "dev-runner":
-        result = _run_dev_step(run, definition, step)
-    elif executor == "lark-doc":
-        result = _publish_lark_doc(run_id, step)
-    elif executor == "notify":
-        result = _notify(run_id, step)
-    else:
-        result = _run_system_step(run_id, step)
-    _mark_step(run_id, step, "completed", result)
-    _notify_step(run, step, "completed", result)
-    next_step = _next_step(step, result)
-    _move_to_next(run_id, next_step)
-    if next_step:
-        enqueue_step(run_id, next_step)
-    return {"step_id": step_id, "status": "completed", "result": result, "next_step": next_step}
+    log_workflow("step.started", f"开始执行步骤：{step['name']}。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload={"executor": step.get("executor"), "payload": payload})
+    try:
+        _mark_step(run_id, step, "running", payload)
+        _notify_step(run, step, "started", payload)
+        executor = step["executor"]
+        if executor == "gate":
+            result = _open_gate(run_id, step)
+            _mark_step(run_id, step, "blocked", result)
+            _notify_step(run, step, "blocked", result)
+            log_workflow("step.blocked", f"步骤进入阻塞状态：{step['name']}。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload=result)
+            return result
+        if executor == "agent":
+            result = _run_agent_step(run, definition, step)
+        elif executor == "validator":
+            result = _run_validator(run_id, step)
+        elif executor == "dev-runner":
+            result = _run_dev_step(run, definition, step)
+        elif executor == "lark-doc":
+            result = _publish_lark_doc(run_id, step)
+        elif executor == "notify":
+            result = _notify(run_id, step)
+        else:
+            result = _run_system_step(run_id, step)
+        _mark_step(run_id, step, "completed", result)
+        _notify_step(run, step, "completed", result)
+        next_step = _next_step(step, result)
+        _move_to_next(run_id, next_step)
+        if next_step:
+            enqueue_step(run_id, next_step)
+        completed = {"step_id": step_id, "status": "completed", "result": result, "next_step": next_step}
+        log_workflow("step.completed", f"步骤执行完成：{step['name']}。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload=completed)
+        return completed
+    except Exception as exc:
+        log_workflow("step.failed", f"步骤执行失败：{step['name']}。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload={"error": str(exc)}, level="error")
+        raise
 
 
 def submit_gate(run_id: str, step_id: str, data: dict[str, Any]) -> dict[str, Any]:
@@ -393,7 +446,9 @@ def submit_gate(run_id: str, step_id: str, data: dict[str, Any]) -> dict[str, An
         enqueue_step(run_id, next_step)
     emit_event(run_id, "gate.submitted", f"gate {step_id} submitted", data)
     _notify_gate_submitted(run, step, data)
-    return {"ok": True, "run_id": run_id, "step_id": step_id, "next_step": next_step}
+    result = {"ok": True, "run_id": run_id, "step_id": step_id, "next_step": next_step}
+    log_workflow("gate.submitted", "Gate 已提交。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload={"data": data, "result": result})
+    return result
 
 
 def handle_lark_card_event(payload: dict[str, Any]) -> dict[str, Any]:
@@ -594,6 +649,7 @@ def write_artifact(
             """,
             (item_id, run_id, name, category, str(path), version, created_by, json.dumps(metadata or {}, ensure_ascii=False), ts),
         )
+    log_workflow("artifact.written", "产物已写入。", run_id=run_id, payload={"name": name, "category": category, "created_by": created_by, "path": str(path), "version": version})
     return {"id": item_id, "run_id": run_id, "name": name, "path": str(path), "version": version}
 
 
@@ -621,6 +677,12 @@ def emit_event(run_id: str, event_type: str, message: str, payload: dict[str, An
             "INSERT INTO events(id,run_id,event_type,message,payload_json,created_at) VALUES(?,?,?,?,?,?)",
             (new_id("evt"), run_id, event_type, message, json.dumps(payload or {}, ensure_ascii=False), now_iso()),
         )
+    try:
+        run = get_run(run_id)
+        project_id = run.get("project_id")
+    except Exception:
+        project_id = None
+    log_workflow(f"event.{event_type}", message, run_id=run_id, project_id=project_id, payload=payload or {})
 
 
 def inspect_workflow(workflow_id: str = DEFAULT_WORKFLOW_ID) -> dict[str, Any]:
@@ -679,6 +741,7 @@ def _run_agent_step(run: dict[str, Any], definition: WorkflowDefinition, step: d
     )
     command = build_agent_command(run["project"]["platform"], Path(package["path"]))
     execution = maybe_run_command(command)
+    _log_agent_execution(run, step, command.executor, execution)
     _ensure_agent_execution_completed(execution, step["id"])
     outputs = []
     for artifact_name in step.get("outputs", []):
@@ -701,7 +764,9 @@ def _run_dev_step(run: dict[str, Any], definition: WorkflowDefinition, step: dic
     )
     command = build_agent_command(platform, Path(package["path"]))
     execution = maybe_run_command(command)
+    _log_agent_execution(run, step, executor, execution)
     _ensure_agent_execution_completed(execution, step["id"])
+    _ensure_dev_execution_verified(execution, step["id"])
     if step["id"] == "regression-testing" and not execution.get("executed"):
         raise WorkflowError(f"{step['id']} requires real QA execution before quality gate evaluation: {execution.get('reason') or 'agent CLI not executed'}")
     result_name = step.get("outputs", [f"{step['id']}_result"])[0]
@@ -718,6 +783,27 @@ def _run_dev_step(run: dict[str, Any], definition: WorkflowDefinition, step: dic
         payload["quality_gate"] = quality_gate
         payload["can_proceed"] = quality_gate["passed"]
     return payload
+
+
+def _log_agent_execution(run: dict[str, Any], step: dict[str, Any], executor: str, execution: dict[str, Any]) -> None:
+    log_workflow(
+        "agent.execution",
+        f"{executor} 执行结果已返回。",
+        run_id=run["id"],
+        project_id=run["project_id"],
+        step_id=step["id"],
+        payload={
+            "executor": executor,
+            "executed": execution.get("executed"),
+            "returncode": execution.get("returncode"),
+            "reason": execution.get("reason"),
+            "blocked": execution.get("blocked"),
+            "command": execution.get("command"),
+            "stdout": execution.get("stdout"),
+            "stderr": execution.get("stderr"),
+        },
+        level="error" if execution.get("returncode") not in {None, 0} or execution.get("blocked") else "info",
+    )
 
 
 def _run_validator(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
@@ -765,7 +851,9 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
     default_title = "{project_title}最终交付报告" if source_name == "final_delivery_report" else "{project_title}" + step["name"]
     title_template = str(step.get("title_template") or lark_config(config).get("final_report_doc_title_template") or default_title)
     title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
-    result = create_doc_as_bot(title, source["content"], identity=lark_identity(config), dry_run=config_lark_dry_run(config))
+    publish_content = _compose_generic_lark_doc_source(run_id, source_name, source["content"], step)
+    doc_xml = _compose_lark_doc_xml(title, publish_content)
+    result = create_doc_as_bot(title, doc_xml, identity=lark_identity(config), dry_run=config_lark_dry_run(config), doc_format="xml")
     if not result.get("ok"):
         raise WorkflowError(f"飞书文档创建失败: {json.dumps(result, ensure_ascii=False)[-800:]}")
     doc_url = extract_doc_url(result)
@@ -788,6 +876,13 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
         ),
         category="lark-doc",
         created_by="lark-bot",
+    )
+    write_artifact(
+        run_id,
+        f"{output_artifact}_xml",
+        doc_xml,
+        category="lark-doc",
+        created_by="workflow",
     )
     _append_lark_doc_manifest(run_id, title=title, source_artifact=source_name, doc_url=doc_url, artifact_name=output_artifact)
     if doc_url:
@@ -826,8 +921,9 @@ def _publish_prd_v2_doc_and_send_approval(run_id: str, step: dict[str, Any]) -> 
     approval_round = int(prd_v2.get("version") or 1)
     title_template = str(lark.get("prd_doc_title_template") or "{project_title}PRD")
     title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
+    prd_doc_xml = _compose_prd_v2_lark_xml(title, run_id, prd_v2["content"])
     _send_lark_text(run, f"PRD v2 已生成，开始创建飞书文档：{title}", event_key=f"{run_id}:prd-v2-doc:start")
-    doc_result = create_doc_as_bot(title, prd_doc_markdown, identity=lark_identity(config), dry_run=dry_run)
+    doc_result = create_doc_as_bot(title, prd_doc_xml, identity=lark_identity(config), dry_run=dry_run, doc_format="xml")
     doc_url = extract_doc_url(doc_result)
     if not doc_url and dry_run:
         doc_url = f"dry-run://lark-doc/{run['project_id']}/prd-v2"
@@ -839,6 +935,7 @@ def _publish_prd_v2_doc_and_send_approval(run_id: str, step: dict[str, Any]) -> 
         created_by="lark-bot",
     )
     write_artifact(run_id, "prd_v2_lark_markdown", prd_doc_markdown, category="prd", created_by="workflow")
+    write_artifact(run_id, "prd_v2_lark_xml", prd_doc_xml, category="prd", created_by="workflow")
     _append_lark_doc_manifest(run_id, title=title, source_artifact="prd_v2", doc_url=doc_url, artifact_name="prd_v2_lark_doc")
     if not doc_result.get("ok"):
         payload = {"result": doc_result}
@@ -1000,7 +1097,7 @@ def _dev_result_content(
     package: dict[str, Any],
     execution: dict[str, Any],
 ) -> str:
-    if step["id"] == "regression-testing" and execution.get("executed"):
+    if step["id"] in {"frontend-development", "backend-development", "development-self-test", "regression-testing", "bug-fix"} and execution.get("executed"):
         stdout = str(execution.get("stdout") or "").strip()
         if stdout:
             return stdout if stdout.startswith(("{", "[", "#")) else f"# {step['name']}\n\n{stdout}\n"
@@ -1011,11 +1108,11 @@ def _dev_result_content(
         "execution": execution,
         "status": "prepared" if not execution.get("executed") else "executed",
     }
-    if step["id"] == "regression-testing":
+    if step["id"] in {"development-self-test", "regression-testing"}:
         payload["quality_gate"] = {
             "thresholds": quality_gate_config(load_config()),
             "bug_counts": {"block": 0, "critical": 0, "major": 0, "minor": 0},
-            "note": "QA Agent 必须在真实执行测试后覆盖本字段；未执行时只能作为待执行任务包。",
+            "note": "Agent 必须在真实执行测试后覆盖本字段；未执行时只能作为待执行任务包。",
         }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -1072,17 +1169,22 @@ def _extract_bug_counts(content: str) -> dict[str, int]:
 
 def _compose_prd_v2_lark_markdown(run_id: str, prd_v2_content: str) -> str:
     prd_v1 = _artifact_content_or_empty(run_id, "prd_v1")
-    review = _artifact_content_or_empty(run_id, "requirement_review_report")
+    review = _normalize_review_report(_artifact_content_or_empty(run_id, "requirement_review_report"))
     rejection = _latest_prd_rejection_reason(run_id)
-    return "\n\n".join(
+    version_table = "\n".join(
         [
-            "## 版本变化表格",
             "| 版本 | 来源 | 主要变化 |",
             "| --- | --- | --- |",
             "| v1 | 原始需求与需求录入 Gate | 初始完整 PRD |",
             f"| v2 | 多 Agent 评审汇总{'与审批拒绝理由' if rejection else ''} | 采纳合理需求修订，保留未采纳说明 |",
+        ]
+    )
+    return "\n\n".join(
+        [
+            "## 版本变化表格",
+            version_table,
             "## 各 Agent 评审意见汇总",
-            review or "暂无评审意见 artifact。",
+            review or "评审报告未包含可展示的评审意见，请检查 requirement_review_report 产物。",
             "## 相比 v1 变更点",
             _summarize_change_points(prd_v2_content),
             "## 未采纳意见",
@@ -1091,6 +1193,176 @@ def _compose_prd_v2_lark_markdown(run_id: str, prd_v2_content: str) -> str:
             prd_v2_content.strip() or prd_v1.strip() or "暂无 PRD 内容。",
         ]
     )
+
+
+def _compose_prd_v2_lark_xml(title: str, run_id: str, prd_v2_content: str) -> str:
+    prd_v1 = _artifact_content_or_empty(run_id, "prd_v1")
+    review = _normalize_review_report(_artifact_content_or_empty(run_id, "requirement_review_report"))
+    rejection = _latest_prd_rejection_reason(run_id)
+    return "".join(
+        [
+            "<doc>",
+            f"<title>{_xml_text(title)}</title>",
+            "<h1>版本变化表格</h1>",
+            "<table>",
+            "<thead><tr><th background-color=\"light-gray\">版本</th><th background-color=\"light-gray\">来源</th><th background-color=\"light-gray\">主要变化</th></tr></thead>",
+            "<tbody>",
+            "<tr><td>v1</td><td>原始需求与需求录入 Gate</td><td>初始完整 PRD</td></tr>",
+            f"<tr><td>v2</td><td>{_xml_text('多 Agent 评审汇总与审批拒绝理由' if rejection else '多 Agent 评审汇总')}</td><td>采纳合理需求修订，保留未采纳说明</td></tr>",
+            "</tbody></table>",
+            "<h1>各 Agent 评审意见汇总</h1>",
+            _markdown_fragment_to_lark_xml(review or "评审报告未包含可展示的评审意见，请检查 requirement_review_report 产物。"),
+            "<h1>相比 v1 变更点</h1>",
+            _markdown_fragment_to_lark_xml(_summarize_change_points(prd_v2_content)),
+            "<h1>未采纳意见</h1>",
+            _markdown_fragment_to_lark_xml(_extract_section_or_placeholder(prd_v2_content, ["未采纳意见", "未采纳", "不采纳"])),
+            "<h1>最终完整 PRD 内容</h1>",
+            _markdown_fragment_to_lark_xml(prd_v2_content.strip() or prd_v1.strip() or "暂无 PRD 内容。"),
+            "</doc>",
+        ]
+    )
+
+
+def _compose_lark_doc_xml(title: str, markdown_content: str) -> str:
+    body = _markdown_fragment_to_lark_xml(markdown_content.strip() or "暂无内容。")
+    return "\n".join(
+        [
+            "<doc>",
+            f"<title>{_xml_text(title)}</title>",
+            body,
+            "</doc>",
+        ]
+    )
+
+
+def _compose_generic_lark_doc_source(run_id: str, source_name: str, content: str, step: dict[str, Any]) -> str:
+    parts = [content.strip() or "暂无内容。"]
+    included_names = set(step.get("include_artifacts", []))
+    for artifact_name in step.get("include_artifacts", []):
+        try:
+            included = read_artifact(run_id, artifact_name)["content"].strip()
+        except WorkflowError:
+            included = ""
+        if included:
+            parts.append(f"## 附：{_artifact_display_name(artifact_name)}\n\n{included}")
+    if source_name in {"frontend_tech_design", "backend_tech_design"} and "tech_review_report" not in included_names:
+        try:
+            review = read_artifact(run_id, "tech_review_report")["content"].strip()
+        except WorkflowError:
+            review = ""
+        if review:
+            parts.append(f"## 附：技术方案评审报告\n\n{review}")
+    return "\n\n".join(parts)
+
+
+def _artifact_display_name(name: str) -> str:
+    labels = {
+        "tech_review_report": "技术方案评审报告",
+        "requirement_review_report": "多角色需求评审报告",
+        "test_report": "测试报告",
+    }
+    return labels.get(name, name)
+
+
+def _normalize_review_report(content: str) -> str:
+    text = content.strip()
+    if not text:
+        return ""
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if lines and re.match(r"^#{1,3}\s*(多角色需求评审报告|各\s*Agent\s*评审意见汇总|评审意见汇总)\s*$", lines[0].strip(), re.IGNORECASE):
+        lines = lines[1:]
+    return "\n".join(lines).strip()
+
+
+def _markdown_fragment_to_lark_xml(content: str) -> str:
+    blocks: list[str] = []
+    list_items: list[str] = []
+    table_lines: list[str] = []
+
+    def flush_list() -> None:
+        nonlocal list_items
+        if list_items:
+            blocks.append("<ul>" + "".join(f"<li>{_xml_inline(item)}</li>" for item in list_items) + "</ul>")
+            list_items = []
+
+    def flush_table() -> None:
+        nonlocal table_lines
+        if table_lines:
+            blocks.append(_markdown_table_to_lark_xml(table_lines))
+            table_lines = []
+
+    for raw_line in content.strip().splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush_table()
+            flush_list()
+            continue
+        if _is_markdown_table_line(line):
+            flush_list()
+            table_lines.append(line)
+            continue
+        flush_table()
+        heading = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading:
+            flush_list()
+            level = min(len(heading.group(1)), 3)
+            blocks.append(f"<h{level}>{_xml_inline(heading.group(2))}</h{level}>")
+            continue
+        bullet = re.match(r"^[-*]\s+(.+)$", line)
+        if bullet:
+            list_items.append(bullet.group(1))
+            continue
+        flush_list()
+        blocks.append(f"<p>{_xml_inline(line)}</p>")
+    flush_table()
+    flush_list()
+    return "".join(blocks) if blocks else "<p>暂无内容。</p>"
+
+
+def _is_markdown_table_line(line: str) -> bool:
+    return line.startswith("|") and line.endswith("|") and line.count("|") >= 2
+
+
+def _markdown_table_to_lark_xml(lines: list[str]) -> str:
+    rows = [_split_markdown_table_row(line) for line in lines if _split_markdown_table_row(line)]
+    if not rows:
+        return ""
+    separator_index = 1 if len(rows) > 1 and all(re.match(r"^:?-{3,}:?$", cell.strip()) for cell in rows[1]) else -1
+    header = rows[0] if separator_index == 1 else []
+    body_rows = rows[2:] if separator_index == 1 else rows
+    parts = ["<table>"]
+    if header:
+        parts.append("<thead><tr>")
+        parts.extend(f"<th background-color=\"light-gray\">{_xml_inline(cell)}</th>" for cell in header)
+        parts.append("</tr></thead>")
+    parts.append("<tbody>")
+    for row in body_rows:
+        parts.append("<tr>")
+        parts.extend(f"<td>{_xml_inline(cell)}</td>" for cell in row)
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def _split_markdown_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _xml_inline(text: str) -> str:
+    parts = re.split(r"(`[^`]+`)", str(text))
+    rendered: list[str] = []
+    for part in parts:
+        if part.startswith("`") and part.endswith("`") and len(part) >= 2:
+            rendered.append(f"<code>{_xml_text(part[1:-1])}</code>")
+        else:
+            rendered.append(_xml_text(part))
+    return "".join(rendered)
+
+
+def _xml_text(text: str) -> str:
+    return escape(str(text), quote=True)
 
 
 def _artifact_content_or_empty(run_id: str, name: str) -> str:
@@ -1402,12 +1674,70 @@ def _ensure_agent_execution_completed(execution: dict[str, Any], step_id: str) -
         raise WorkflowError(f"{step_id} Agent CLI failed: {detail}")
 
 
+def _ensure_dev_execution_verified(execution: dict[str, Any], step_id: str) -> None:
+    if step_id not in {"frontend-development", "backend-development", "development-self-test", "regression-testing", "bug-fix"}:
+        return
+    if not execution.get("executed"):
+        return
+    text = "\n".join(str(execution.get(key) or "") for key in ("stdout", "stderr")).lower()
+    blockers = [
+        "暂未运行",
+        "未运行",
+        "未执行",
+        "无法运行",
+        "不能运行",
+        "需要批准",
+        "需要您批准",
+        "等待批准",
+        "awaiting approval",
+        "requires your approval",
+        "need your approval",
+        "not run",
+        "not executed",
+        "could not run",
+        "unable to run",
+        "blocked on running tests",
+        "waiting for approval",
+    ]
+    if any(blocker in text for blocker in blockers):
+        raise WorkflowError(f"{step_id} did not complete required self-test/regression execution; Agent output indicates validation was not run or is waiting for approval")
+
+
 def _agent_output_content(step: dict[str, Any], artifact_name: str, prompt: str, execution: dict[str, Any]) -> str:
+    file_content = _agent_output_file_content(step, artifact_name)
+    if file_content:
+        return file_content
     if execution.get("executed") and int(execution.get("returncode") or 0) == 0:
         stdout = str(execution.get("stdout") or "").strip()
         if stdout:
             return stdout if stdout.startswith("#") else f"# {step['name']} / {artifact_name}\n\n{stdout}\n"
     return _agent_output_template(step, artifact_name, prompt, execution)
+
+
+def _agent_output_file_content(step: dict[str, Any], artifact_name: str) -> str | None:
+    for path in _agent_output_file_candidates(step, artifact_name):
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if content:
+            return content
+    return None
+
+
+def _agent_output_file_candidates(step: dict[str, Any], artifact_name: str) -> list[Path]:
+    candidates: dict[str, list[Path]] = {
+        "ui_design_spec": [
+            artifact_root() / "DESIGN.md",
+            artifact_root() / "ui-designer" / "ui" / "v1" / "ui-design-spec.md",
+        ],
+        "test_cases": [
+            artifact_root() / "test_cases.md",
+        ],
+    }
+    return candidates.get(artifact_name, [])
 
 
 def _agent_output_template(step: dict[str, Any], artifact_name: str, prompt: str, execution: dict[str, Any]) -> str:

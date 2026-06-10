@@ -5,7 +5,7 @@ import sys
 from typing import Any
 
 from .capabilities import doctor
-from .config import lark_dry_run, lark_enabled, load_config
+from .config import initialize_project_workspace, lark_dry_run, lark_enabled, load_config
 from .engine import (
     WorkflowError,
     create_project,
@@ -39,6 +39,16 @@ TOOLS = [
                 "requires_backend": {"type": "boolean"},
             },
             "required": ["requirement"],
+        },
+    },
+    {
+        "name": "delivery_init_project_config",
+        "description": "Initialize the current project workspace: workflow.config.json, .delivery-workflow/delivery.db, logs, delivery-project, and source-code.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "overwrite_config": {"type": "boolean"},
+            },
         },
     },
     {
@@ -187,6 +197,8 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
             requires_backend=args.get("requires_backend", True),
         )
         return _maybe_auto_watch_created_project(created)
+    if name == "delivery_init_project_config":
+        return initialize_project_workspace(overwrite_config=bool(args.get("overwrite_config")))
     if name == "delivery_get_current_project_status":
         return current_project_status()
     if name == "delivery_delete_current_project":

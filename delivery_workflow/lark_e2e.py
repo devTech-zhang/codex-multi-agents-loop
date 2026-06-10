@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .capabilities import doctor
-from .config import lark_config, load_config
+from .config import lark_chat_id, lark_config, load_config
 from .engine import (
     _delete_project_records,
     create_project,
@@ -265,8 +265,9 @@ def _preflight(config: dict[str, Any] | None = None) -> dict[str, Any]:
     problems = []
     if not lark.get("enabled", True):
         problems.append("lark.enabled is false")
-    if not lark.get("chat_id"):
-        problems.append("lark.chat_id is missing")
+    chat_id = lark_chat_id(config)
+    if not chat_id:
+        problems.append("LARK_CHAT_ID is missing")
     if lark.get("dry_run"):
         problems.append("lark.dry_run is true; live E2E requires real Lark calls")
     if not capability["lark_doc"]["ok"]:
@@ -278,7 +279,7 @@ def _preflight(config: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "ok": not problems,
         "problems": problems,
-        "chat_id": lark.get("chat_id"),
+        "chat_id": chat_id,
         "event_report": sdk_report,
         "doctor": capability,
     }

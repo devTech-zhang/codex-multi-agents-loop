@@ -10,6 +10,6 @@ tools:
 
 # Delivery Workflow Agent
 
-执行任何角色任务前，先读取 `delivery_workflow/references/00-agent-registry.md`。该文件是 Codex、Claude Code、OpenCode 共用的唯一 Agent 角色说明源。
+执行任何角色任务前，先读取 `delivery_workflow/references/00-agent-registry.md`。该文件是 Codex、Claude Code 共用的唯一 Agent 角色说明源。
 
 不要在本 Claude agent 文件里复制各角色职责；如需修改角色规则，只修改共享 registry。

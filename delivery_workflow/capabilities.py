@@ -113,8 +113,8 @@ def ui_design_capability() -> dict[str, Any]:
 
 
 def detect_primary_platform() -> str | None:
-    """Detect the primary available platform CLI. Priority: claude → codex → opencode."""
-    for cmd in ("claude", "codex", "opencode"):
+    """Detect the primary available platform CLI. Priority: claude → codex."""
+    for cmd in ("claude", "codex"):
         if command_available(cmd):
             return cmd
     return None
@@ -124,7 +124,6 @@ def doctor() -> dict[str, Any]:
     available = {
         "claude": command_available("claude"),
         "codex": command_available("codex"),
-        "opencode": command_available("opencode"),
         "lark-cli": command_available("lark-cli"),
     }
     return {
@@ -140,6 +139,5 @@ def _platform_hint(platform: str | None) -> str | None:
     hints = {
         "claude": "当前环境检测到 Claude Code，workflow 将以 `claude -p` 模式执行编码任务。",
         "codex": "当前环境检测到 Codex，workflow 将生成 Codex 执行包。",
-        "opencode": "当前环境检测到 OpenCode。",
     }
     return hints.get(platform) if platform else "未检测到任何平台 CLI，workflow 将只生成任务包。"

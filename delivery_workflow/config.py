@@ -59,16 +59,11 @@ DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
                 "command": ["{binary}", "--permission-mode", "acceptEdits", "-p"],
                 "stdin_from_prompt": True,
             },
-            "opencode": {
-                "binary_candidates": ["opencode"],
-                "command": ["{binary}", "run", "--file", "{prompt_path}"],
-            },
         },
     },
     "lark": {
         "enabled": True,
         "identity": "bot",
-        "chat_id": "",
         "dry_run": False,
         "send_step_notifications": True,
         "send_prd_approval_card": True,
@@ -81,16 +76,11 @@ DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
         "sdk": {
             "credential_source": "lark-cli",
             "profile": "",
-            "app_id": "",
-            "app_secret": "",
             "log_level": "info",
         },
         "event": {
             "transport": "sdk_websocket",
             "auto_start_consumer": True,
-        },
-        "bot_commands": {
-            "enabled": True,
         },
     },
 }
@@ -103,6 +93,7 @@ def load_config() -> dict[str, Any]:
             f"missing {WORKSPACE_CONFIG_NAME}; run `python3 -m delivery_workflow.cli config init` in the project workspace"
         )
     config = _read_json(path)
+    _remove_sensitive_lark_config(config)
     from_env = _load_env_layers(path)
     _apply_env_overrides(config, from_env)
     return config
@@ -131,6 +122,29 @@ def write_workspace_config(*, overwrite: bool = False) -> Path:
     return target
 
 
+def initialize_project_workspace(*, overwrite_config: bool = False) -> dict[str, Any]:
+    from .workflow_log import log_workflow
+
+    log_workflow("project_workspace.init.started", "开始初始化当前项目工作区。", payload={"overwrite_config": overwrite_config})
+    config_path = Path.cwd() / WORKSPACE_CONFIG_NAME
+    if overwrite_config or not config_path.exists():
+        config_path = write_workspace_config(overwrite=overwrite_config)
+    from .storage import init_db
+    from .paths import artifact_root, log_root, source_root
+
+    db = init_db()
+    result = {
+        "config_path": str(config_path),
+        "db_path": str(db),
+        "home": str(db.parent),
+        "logs": str(log_root()),
+        "artifact_root": str(artifact_root()),
+        "source_root": str(source_root()),
+    }
+    log_workflow("project_workspace.init.completed", "当前项目工作区初始化完成。", payload=result)
+    return result
+
+
 def code_platform_for_step(config: dict[str, Any], step_id: str | None = None, fallback: str | None = None) -> str:
     platforms = config.get("code_platforms") or {}
     auto_detect = platforms.get("auto_detect", True)
@@ -152,7 +166,7 @@ def normalize_platform(platform: str | None) -> str:
     value = (platform or "auto").strip().lower().replace("_", "-")
     if value in {"claude", "claude-code"}:
         return "claude-code"
-    if value in {"codex", "opencode"}:
+    if value in {"codex"}:
         return value
     if value == "auto":
         return detect_platform()
@@ -160,8 +174,8 @@ def normalize_platform(platform: str | None) -> str:
 
 
 def detect_platform() -> str:
-    """Auto-detect available platform CLI. Priority: claude → codex → opencode."""
-    for cmd, result in (("claude", "claude-code"), ("codex", "codex"), ("opencode", "opencode")):
+    """Auto-detect available platform CLI. Priority: claude → codex."""
+    for cmd, result in (("claude", "claude-code"), ("codex", "codex")):
         if shutil.which(cmd):
             return result
     return "codex"
@@ -250,6 +264,17 @@ def _apply_env_overrides(config: dict[str, Any], env_vals: dict[str, str] | None
         value = os.environ.get(env_key) or (env_vals or {}).get(env_key)
         if value:
             _deep_set(config, config_path, value)
+
+
+def _remove_sensitive_lark_config(config: dict[str, Any]) -> None:
+    lark = config.get("lark")
+    if not isinstance(lark, dict):
+        return
+    lark.pop("chat_id", None)
+    sdk = lark.get("sdk")
+    if isinstance(sdk, dict):
+        sdk.pop("app_id", None)
+        sdk.pop("app_secret", None)
 
 
 def _deep_set(config: dict[str, Any], path: list[str], value: str) -> None:

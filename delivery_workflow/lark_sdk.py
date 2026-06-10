@@ -56,7 +56,7 @@ def load_sdk_credentials(config: dict[str, Any]) -> LarkSdkCredentials:
     explicit_app_id = str(sdk.get("app_id") or "").strip()
     explicit_secret = str(sdk.get("app_secret") or "").strip()
     if explicit_app_id and explicit_secret:
-        return LarkSdkCredentials(app_id=explicit_app_id, app_secret=explicit_secret, source="workflow.config.json")
+        return LarkSdkCredentials(app_id=explicit_app_id, app_secret=explicit_secret, source=".env")
 
     source = str(sdk.get("credential_source") or "lark-cli").strip().lower()
     if source != "lark-cli":
@@ -72,7 +72,7 @@ def load_sdk_credentials(config: dict[str, Any]) -> LarkSdkCredentials:
     if not app_id:
         raise LarkSdkConfigError("lark-cli app config is missing appId")
     if not app_secret or app_secret == "****":
-        raise LarkSdkConfigError("lark-cli app config is missing readable appSecret; set lark.sdk.app_secret or make lark-cli credentials readable")
+        raise LarkSdkConfigError("lark-cli app config is missing readable appSecret; set LARK_APP_SECRET in .env or make lark-cli credentials readable")
     return LarkSdkCredentials(app_id=app_id, app_secret=app_secret, source="lark-cli", profile=app_id)
 
 
