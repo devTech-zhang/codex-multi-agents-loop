@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/delivery-workflow-logo.png" alt="Delivery Workflow logo" width="120" />
+</p>
+
 # Delivery Workflow
 
 通用软件交付 Workflow Worker 与多 Agent 编排插件。它把需求、PRD、评审、设计、开发、测试、缺陷修复和最终交付报告组织成一个可追踪、可恢复、可审计的本地项目流程。
@@ -10,6 +14,18 @@
 
 > [!NOTE]
 > 当前支持 Codex 和 Claude Code。每个业务目录就是一个独立项目，workflow 状态、资料和源码都落在当前目录内。
+
+## 效果预览
+
+### Claude Code 工作流推进
+
+![Claude Code 中创建并推进交付流程](./assets/claude-code-screenshot1.png)
+
+![Claude Code 中查看 workflow 状态与执行结果](./assets/claude-code-screenshot2.png)
+
+### 飞书文档归档
+
+![飞书中自动发布的项目资料文档](./assets/lark-screenshot.png)
 
 ## 为什么需要它
 

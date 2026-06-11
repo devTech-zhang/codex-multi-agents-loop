@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/delivery-workflow-logo.png" alt="Delivery Workflow logo" width="120" />
+</p>
+
 # Delivery Workflow
 
 A general-purpose software delivery Workflow Worker and multi-agent orchestration plugin. It turns requirements, PRDs, reviews, design, development, testing, bug fixing, and final reports into a traceable, recoverable, auditable local project workflow.
@@ -10,6 +14,18 @@ A general-purpose software delivery Workflow Worker and multi-agent orchestratio
 
 > [!NOTE]
 > Currently supports Codex and Claude Code. Each business workspace is treated as one independent project; workflow state, artifacts, and source code stay inside that directory.
+
+## Preview
+
+### Claude Code Workflow
+
+![Creating and advancing a delivery workflow in Claude Code](./assets/claude-code-screenshot1.png)
+
+![Checking workflow status and execution results in Claude Code](./assets/claude-code-screenshot2.png)
+
+### Feishu/Lark Document Archive
+
+![Automatically published project documents in Feishu/Lark](./assets/lark-screenshot.png)
 
 ## Why It Exists
 
