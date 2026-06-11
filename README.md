@@ -188,7 +188,7 @@ LARK_CHAT_ID=oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## 飞书审批
 
-PRD v2 会被整理成带标题和表格结构的 Markdown，再通过 `lark-cli docs +create --title --markdown` 创建飞书文档，避免文档显示 `Untitled` 或表格渲染成纯文本。
+PRD v2 会被整理成带标题和表格结构的 Markdown 文件，再通过 `lark-cli docs +create --content @file --doc-format markdown` 创建飞书文档，避免长正文直接塞进命令参数导致创建失败。
 
 审批卡片包含：
 

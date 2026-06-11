@@ -136,6 +136,7 @@ def create_project(
         "项目已创建，Worker 自动启动并进入 PRD v1 流程。",
         {"project_id": project_id, "start_step": start_step},
     )
+    _send_lark_text(get_run(run_id), f"{project_title} 项目已创建。", event_key=f"{run_id}:project-created")
     if auto_start:
         enqueue_step(run_id, start_step)
     auto_run_result = None
@@ -268,7 +269,10 @@ def list_jobs(run_id: str | None = None, status: str | None = None, limit: int =
 
 
 def enqueue_step(run_id: str, step_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    definition = load_workflow(get_run(run_id)["workflow_id"])
+    run = get_run(run_id)
+    if run["status"] in {"completed", "failed"}:
+        raise WorkflowError(f"cannot enqueue {step_id}: workflow run {run_id} is {run['status']}")
+    definition = load_workflow(run["workflow_id"])
     step = definition.step(step_id)
     job_id = new_id("job")
     ts = now_iso()
@@ -296,11 +300,23 @@ def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
     with connect() as conn:
         if run_id:
             row = conn.execute(
-                "SELECT * FROM jobs WHERE status = 'pending' AND run_id = ? ORDER BY created_at LIMIT 1",
+                """
+                SELECT jobs.* FROM jobs
+                JOIN workflow_runs ON workflow_runs.id = jobs.run_id
+                WHERE jobs.status = 'pending' AND jobs.run_id = ? AND workflow_runs.status NOT IN ('completed','failed')
+                ORDER BY jobs.created_at LIMIT 1
+                """,
                 (run_id,),
             ).fetchone()
         else:
-            row = conn.execute("SELECT * FROM jobs WHERE status = 'pending' ORDER BY created_at LIMIT 1").fetchone()
+            row = conn.execute(
+                """
+                SELECT jobs.* FROM jobs
+                JOIN workflow_runs ON workflow_runs.id = jobs.run_id
+                WHERE jobs.status = 'pending' AND workflow_runs.status NOT IN ('completed','failed')
+                ORDER BY jobs.created_at LIMIT 1
+                """
+            ).fetchone()
         if not row:
             log_workflow("worker.idle", "Worker 没有发现 pending job。", run_id=run_id)
             return {"ok": True, "idle": True}

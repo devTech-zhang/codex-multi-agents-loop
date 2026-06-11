@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -27,11 +28,33 @@ def create_doc_as_bot(
         identity,
         "--api-version",
         "v2",
-        "--title",
-        title,
     ]
-    command.extend(["--markdown", content])
+    content_path = _write_doc_content_file(title, content, doc_format=doc_format)
+    command.extend(["--doc-format", doc_format, "--content", f"@{content_path}"])
     return _run_json(command, timeout=120, dry_run=dry_run)
+
+
+def _write_doc_content_file(title: str, content: str, *, doc_format: str) -> Path:
+    root = Path.cwd() / ".delivery-workflow" / "tmp" / "lark-docs"
+    root.mkdir(parents=True, exist_ok=True)
+    suffix = ".md" if doc_format == "markdown" else ".xml"
+    path = root / f"doc-{uuid.uuid4().hex}{suffix}"
+    if doc_format == "markdown":
+        body = content.strip()
+        if body.startswith(f"# {title}\n") or body == f"# {title}":
+            pass
+        else:
+            body = f"# {title}\n\n{body}" if body else f"# {title}"
+    else:
+        body = content.strip()
+        if "<title" not in body[:500]:
+            body = f"<title>{_xml_text(title)}</title>\n\n{body}" if body else f"<title>{_xml_text(title)}</title>"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _xml_text(text: str) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def send_text_as_bot(chat_id: str, text: str, *, identity: str = "bot", dry_run: bool = False, idempotency_key: str | None = None) -> dict[str, Any]:

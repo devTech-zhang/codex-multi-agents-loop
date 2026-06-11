@@ -188,7 +188,7 @@ LARK_CHAT_ID=oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 ## Feishu/Lark Approval
 
-PRD v2 is organized as Markdown with a real title and table structure, then published through `lark-cli docs +create --title --markdown` to avoid `Untitled` documents or tables rendered as plain text.
+PRD v2 is organized as a Markdown file with a real title and table structure, then published through `lark-cli docs +create --content @file --doc-format markdown` to avoid failures caused by passing long document bodies directly as command arguments.
 
 The approval card includes:
 

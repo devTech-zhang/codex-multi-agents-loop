@@ -248,6 +248,8 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(current["run"]["status"], "failed")
         step_run = next(item for item in current["step_runs"] if item["step_id"] == "prd-v1")
         self.assertEqual(step_run["status"], "failed")
+        with self.assertRaises(WorkflowError):
+            enqueue_step(created["run_id"], "prd-validation")
 
     def test_ui_design_spec_prefers_written_design_md_over_stdout_summary(self) -> None:
         self.write_config({"code_platforms": {"enable_agent_cli": True}})
@@ -314,15 +316,25 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(prd_doc["title"], "客户退款审批PRD")
         self.assertEqual(prd_doc["url"], f"dry-run://lark-doc/{created['project_id']}/prd-v2")
         self.assertEqual(prd_doc["result"]["command"][:5], ["lark-cli", "docs", "+create", "--as", "bot"])
+        with connect() as conn:
+            project_created_notice = conn.execute(
+                "SELECT * FROM events WHERE run_id = ? AND event_type = 'lark.notify.sent' AND message = ?",
+                (run_id, "客户退款审批 项目已创建。"),
+            ).fetchone()
+        self.assertIsNotNone(project_created_notice)
         prd_doc_markdown = read_artifact(run_id, "prd_v2_lark_markdown")["content"]
         for heading in ("版本变化表格", "各 Agent 评审意见汇总", "相比 v1 变更点", "未采纳意见", "最终完整 PRD 内容"):
             self.assertIn(heading, prd_doc_markdown)
         self.assertIn("| 版本 | 来源 | 主要变化 |\n| --- | --- | --- |\n| v1", prd_doc_markdown)
         command_text = "\n".join(prd_doc["result"]["command"])
-        self.assertIn("--title\n客户退款审批PRD", command_text)
-        self.assertIn("--markdown", command_text)
-        self.assertNotIn("--doc-format", command_text)
+        self.assertIn("--doc-format\nmarkdown", command_text)
+        self.assertIn("--content\n@", command_text)
+        self.assertNotIn("--title", command_text)
         self.assertNotIn("<doc>", command_text)
+        content_arg = prd_doc["result"]["command"][prd_doc["result"]["command"].index("--content") + 1]
+        content_file = Path(content_arg[1:])
+        self.assertTrue(content_file.exists())
+        self.assertTrue(content_file.read_text(encoding="utf-8").startswith("# 客户退款审批PRD\n"))
 
         card = json.loads(read_artifact(run_id, "prd_approval_card_message")["content"])
         command = card["result"]["command"]
@@ -611,9 +623,9 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         final_doc = json.loads(read_artifact(run_id, "final_report_lark_doc")["content"])
         command = final_doc["command"]
         command_text = "\n".join(command)
-        self.assertIn("--title\n客户退款审批最终交付报告", command_text)
-        self.assertIn("--markdown", command_text)
-        self.assertNotIn("--doc-format", command_text)
+        self.assertIn("--doc-format\nmarkdown", command_text)
+        self.assertIn("--content\n@", command_text)
+        self.assertNotIn("--title", command_text)
         final_doc_markdown = read_artifact(run_id, "final_report_lark_doc_markdown")["content"]
         self.assertIn("最终交付报告", final_doc_markdown)
         with connect() as conn:
