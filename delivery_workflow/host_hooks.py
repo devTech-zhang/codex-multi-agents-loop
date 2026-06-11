@@ -12,14 +12,11 @@ from .workflow_log import log_workflow
 
 
 SENSITIVE_COMMAND_PATTERNS = [
-    r"\bcat\s+\.env\b",
-    r"\bgrep\b.*\.env\b",
-    r"\brg\b.*\.env\b",
-    r"\bprintenv\b",
-    r"\benv\b",
+    r"\b(cat|less|more|head|tail)\s+(?:[^\n;&|]*\s)?(?:\.env|[^\s;&|]*/\.env)\b",
+    r"\b(printenv|env)\b(?:\s*$|\s*[;&|])",
 ]
 DESTRUCTIVE_COMMAND_PATTERNS = [
-    r"\brm\s+-rf\s+(/|\$HOME|~|\.)",
+    r"\brm\s+-rf\s+(?:--\s+)?(?:/|\$HOME|~|\.|\.\.)\s*(?:$|[;&|])",
     r"\bgit\s+reset\s+--hard\b",
     r"\bgit\s+clean\s+-fdx\b",
     r"\bchmod\s+-R\s+777\b",

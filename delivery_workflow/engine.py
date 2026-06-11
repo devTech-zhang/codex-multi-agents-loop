@@ -1061,6 +1061,9 @@ def _project_owned_paths() -> list[Path]:
     return [
         Path.cwd() / WORKSPACE_CONFIG_NAME,
         Path.cwd() / ".env",
+        Path.cwd() / ".env.example",
+        Path.cwd() / ".gitignore",
+        Path.cwd() / ".claude",
         artifact_root(),
         source_root(),
         Path.cwd() / ".delivery-workflow",

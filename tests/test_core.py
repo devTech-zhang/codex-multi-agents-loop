@@ -961,6 +961,10 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         project_id = created["project_id"]
         Path("source-code/frontend").mkdir(parents=True)
         Path("source-code/frontend/package.json").write_text("{}", encoding="utf-8")
+        Path(".claude").mkdir()
+        Path(".claude/settings.local.json").write_text("{}", encoding="utf-8")
+        Path(".env.example").write_text("LARK_APP_ID=\n", encoding="utf-8")
+        Path(".gitignore").write_text(".env\n", encoding="utf-8")
 
         self.assertEqual(current_project_status()["run"]["project_id"], project_id)
         result = delete_current_project()
@@ -972,8 +976,13 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertFalse(Path("delivery-project").exists())
         self.assertFalse(Path("source-code").exists())
         self.assertFalse(Path(WORKSPACE_CONFIG_NAME).exists())
+        self.assertFalse(Path(".claude").exists())
+        self.assertFalse(Path(".env.example").exists())
+        self.assertFalse(Path(".gitignore").exists())
         with zipfile.ZipFile(backup) as archive:
             self.assertIn("source-code/frontend/package.json", archive.namelist())
+            self.assertIn(".claude/settings.local.json", archive.namelist())
+            self.assertIn(".env.example", archive.namelist())
         with self.assertRaises(WorkflowError):
             current_project_status()
 
@@ -1015,6 +1024,17 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         output = decision["hookSpecificOutput"]
         self.assertEqual(output["permissionDecision"], "deny")
         self.assertIn("environment secrets", output["permissionDecisionReason"])
+
+    def test_host_hook_safety_guard_allows_code_search_and_specific_cleanup(self) -> None:
+        for command in ('rg -n ".env" delivery_workflow tests', "rm -rf .claude .delivery-workflow"):
+            with (
+                patch("sys.stdin", io.StringIO(json.dumps({"tool_name": "Bash", "tool_input": {"command": command}}))),
+                patch("sys.stdout", new_callable=io.StringIO) as stdout,
+            ):
+                exit_code = host_hook_main(["safety-guard"])
+
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(stdout.getvalue(), "")
 
     def test_mcp_config_uses_portable_wrapper_entrypoint(self) -> None:
         self.assertFalse((PLUGIN_ROOT / ".mcp.json").exists())
