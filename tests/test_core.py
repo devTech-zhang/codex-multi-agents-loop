@@ -22,7 +22,7 @@ from delivery_workflow.engine import (
     write_artifact,
 )
 from delivery_workflow.host_hooks import _blocked_command_reason
-from delivery_workflow.lark import create_doc_as_bot, run_project_lark_cli
+from delivery_workflow.lark import create_doc_as_bot, run_project_lark_cli, send_text_as_bot
 from delivery_workflow.mcp_server import _call_tool as call_mcp_tool
 
 
@@ -87,13 +87,24 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
             patch.dict(os.environ, {"LARK_APP_ID": "cli_global", "LARK_APP_SECRET": "secret_global"}),
             patch("delivery_workflow.lark.subprocess.run", return_value=FakeCompleted()) as run,
         ):
-            result = create_doc_as_bot("测试文档", "<doc><title>测试文档</title><p>正文</p></doc>", dry_run=False, doc_format="xml")
+            result = create_doc_as_bot("测试文档", "<p>正文</p>", dry_run=False, doc_format="xml")
 
         self.assertTrue(result["ok"])
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0][:5], ["lark-cli", "docs", "+create", "--as", "bot"])
+        content_arg = run.call_args.args[0][-1]
+        self.assertTrue(content_arg.startswith("@"))
+        xml_content = Path(content_arg[1:]).read_text(encoding="utf-8")
+        self.assertTrue(xml_content.startswith("<title>测试文档</title>"))
+        self.assertNotIn("<doc>", xml_content)
         self.assertNotIn("env", run.call_args.kwargs)
         self.assertNotIn("LARK_APP_SECRET", json.dumps(result, ensure_ascii=False))
+
+        create_doc_as_bot("测试文档", "<doc><title>测试文档</title><p>正文</p></doc>", dry_run=False, doc_format="xml")
+        wrapped_content_arg = run.call_args.args[0][-1]
+        wrapped_xml_content = Path(wrapped_content_arg[1:]).read_text(encoding="utf-8")
+        self.assertNotIn("<doc>", wrapped_xml_content)
+        self.assertNotIn("</doc>", wrapped_xml_content)
 
     def test_lark_cli_wrapper_is_plain_passthrough(self) -> None:
         class FakeCompleted:
@@ -107,6 +118,23 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(run.call_args.args[0], ["lark-cli", "auth", "status"])
         self.assertNotIn("env", run.call_args.kwargs)
+
+    def test_lark_message_idempotency_key_is_cli_safe(self) -> None:
+        class FakeCompleted:
+            returncode = 0
+            stdout = json.dumps({"ok": True})
+            stderr = ""
+
+        raw_key = "run_20260611_c5f0c339:development-doc-confirmation:docs-ready"
+        with patch("delivery_workflow.lark.subprocess.run", return_value=FakeCompleted()) as run:
+            result = send_text_as_bot("oc_test", "文档已创建", idempotency_key=raw_key)
+
+        self.assertTrue(result["ok"])
+        command = run.call_args.args[0]
+        key = command[command.index("--idempotency-key") + 1]
+        self.assertLessEqual(len(key), 50)
+        self.assertNotIn(":", key)
+        self.assertTrue(key.startswith("run_20260611_c5f0c339-development-doc"))
 
     def test_workflow_definition_matches_document_confirmation_flow(self) -> None:
         workflow = load_workflow()
@@ -200,6 +228,8 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         args = create_doc.call_args.args
         self.assertEqual(args[0], "TODO H5 PRD")
         self.assertIn("<title>TODO H5 PRD</title>", args[1])
+        self.assertNotIn("<doc>", args[1])
+        self.assertIn("<callout", args[1])
         self.assertIn("<h1>版本变化表格</h1>", args[1])
         self.assertIn("<h1>各 Agent 评审意见汇总</h1>", args[1])
         self.assertIn("补充空状态", args[1])
@@ -221,15 +251,19 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
                 {"source_artifact": "prd_v2", "url": "https://example.test/prd"},
                 {"source_artifact": "ui_design_spec", "url": "https://example.test/ui"},
                 {"source_artifact": "frontend_tech_design", "url": "https://example.test/frontend"},
-                {"source_artifact": "smoke_test_cases", "url": "https://example.test/smoke"},
                 {"source_artifact": "test_report", "url": "https://example.test/test-report"},
                 {"source_artifact": "final_delivery_report", "url": "https://example.test/final-report"},
             ]
         }
         write_artifact(run_id, "lark_doc_manifest", json.dumps(manifest, ensure_ascii=False), category="lark-doc", created_by="test")
+        write_artifact(run_id, "smoke_test_cases", "# 冒烟测试用例\n\n- 首页加载", category="test", created_by="test")
 
-        with patch("delivery_workflow.engine.send_text_as_bot", return_value={"ok": True, "message_id": "msg_docs"}) as send_text:
-            execute_step(run_id, "development-doc-confirmation")
+        with (
+            patch("delivery_workflow.engine.lark_doc_capability", return_value={"ok": True}),
+            patch("delivery_workflow.engine.create_doc_as_bot", return_value={"ok": True, "url": "https://example.test/smoke"}),
+            patch("delivery_workflow.engine.send_text_as_bot", return_value={"ok": True, "message_id": "msg_docs"}) as send_text,
+        ):
+            execute_step(run_id, "publish-smoke-test-cases-doc")
 
         self.assertEqual(send_text.call_count, 1)
         docs_message = send_text.call_args.args[1]
@@ -237,6 +271,11 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertIn("PRD：https://example.test/prd", docs_message)
         self.assertIn("UI 设计规范：https://example.test/ui", docs_message)
         self.assertIn("冒烟测试用例：https://example.test/smoke", docs_message)
+
+        with patch("delivery_workflow.engine.send_text_as_bot", return_value={"ok": True, "message_id": "msg_gate"}) as send_text:
+            execute_step(run_id, "development-doc-confirmation")
+
+        send_text.assert_not_called()
 
         with patch("delivery_workflow.engine.send_text_as_bot", return_value={"ok": True, "message_id": "msg_final"}) as send_text:
             execute_step(run_id, "delivery-notification")

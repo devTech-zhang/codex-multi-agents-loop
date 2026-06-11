@@ -818,6 +818,8 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
         created_by="workflow",
     )
     _append_lark_doc_manifest(run_id, title=title, source_artifact=source_name, doc_url=doc_url, artifact_name=output_artifact)
+    if source_name == "smoke_test_cases":
+        _send_lark_text(run, _compose_pre_development_docs_notification(run_id), event_key=f"{run_id}:pre-development-docs-ready")
     return {"capability": capability, "artifact": artifact, "doc_url": doc_url, "lark_cli": result}
 
 
@@ -1034,8 +1036,8 @@ def _compose_prd_v2_lark_xml(title: str, run_id: str, prd_v2_content: str) -> st
     rejection = _latest_prd_rejection_reason(run_id)
     return "".join(
         [
-            "<doc>",
             f"<title>{_xml_text(title)}</title>",
+            "<callout emoji=\"✅\" background-color=\"light-green\" border-color=\"green\"><p>最终 PRD 已基于多 Agent 评审整理完成，请按章节核对版本变化、评审意见、变更点、未采纳意见和完整 PRD 内容。</p></callout>",
             "<h1>版本变化表格</h1>",
             "<table>",
             "<thead><tr><th background-color=\"light-gray\">版本</th><th background-color=\"light-gray\">来源</th><th background-color=\"light-gray\">主要变化</th></tr></thead>",
@@ -1051,7 +1053,6 @@ def _compose_prd_v2_lark_xml(title: str, run_id: str, prd_v2_content: str) -> st
             _markdown_fragment_to_lark_xml(_extract_section_or_placeholder(prd_v2_content, ["未采纳意见", "未采纳", "不采纳"])),
             "<h1>最终完整 PRD 内容</h1>",
             _markdown_fragment_to_lark_xml(prd_v2_content.strip() or prd_v1.strip() or "暂无 PRD 内容。"),
-            "</doc>",
         ]
     )
 
@@ -1060,10 +1061,9 @@ def _compose_lark_doc_xml(title: str, markdown_content: str) -> str:
     body = _markdown_fragment_to_lark_xml(markdown_content.strip() or "暂无内容。")
     return "\n".join(
         [
-            "<doc>",
             f"<title>{_xml_text(title)}</title>",
+            "<callout emoji=\"ℹ️\" background-color=\"light-blue\" border-color=\"blue\"><p>本文档由 Delivery Workflow 根据对应 Agent 产物整理生成，请以源产物和本页内容共同作为交付依据。</p></callout>",
             body,
-            "</doc>",
         ]
     )
 
@@ -1203,12 +1203,20 @@ def _xml_inline(text: str) -> str:
         if part.startswith("`") and part.endswith("`") and len(part) >= 2:
             rendered.append(f"<code>{_xml_text(part[1:-1])}</code>")
         else:
-            rendered.append(_xml_text(part))
+            rendered.append(_xml_rich_text(part))
     return "".join(rendered)
 
 
 def _xml_text(text: str) -> str:
     return escape(str(text), quote=True)
+
+
+def _xml_rich_text(text: str) -> str:
+    escaped = _xml_text(text)
+    escaped = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"__([^_]+)__", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"<em>\1</em>", escaped)
+    return escaped
 
 
 def _artifact_content_or_empty(run_id: str, name: str) -> str:
@@ -1265,9 +1273,6 @@ def _append_lark_doc_manifest(
 def _notify_step(run: dict[str, Any], step: dict[str, Any], phase: str, payload: dict[str, Any]) -> None:
     message = _step_notification_message(step, phase)
     emit_event(run["id"], f"workflow.step.{phase}", message, {"step_id": step["id"], "payload": payload})
-    if step["id"] == "development-doc-confirmation" and phase == "blocked":
-        docs_message = _compose_pre_development_docs_notification(run["id"])
-        _send_lark_text(run, docs_message, event_key=f"{run['id']}:{step['id']}:docs-ready")
 
 
 def _notify_gate_submitted(run: dict[str, Any], step: dict[str, Any], data: dict[str, Any]) -> None:
@@ -1368,6 +1373,7 @@ def _send_lark_text(run: dict[str, Any], message: str, *, event_key: str) -> dic
         return None
     chat_id = _lark_chat_id(run)
     if not chat_id:
+        emit_event(run["id"], "lark.notify.skipped", "飞书消息未发送：缺少 lark.chat_id。", {"reason": "missing_chat_id", "message": message})
         return None
     result = send_text_as_bot(chat_id, message, identity=lark_identity(config), dry_run=False, idempotency_key=event_key)
     emit_event(

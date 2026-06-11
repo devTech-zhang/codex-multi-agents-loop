@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import uuid
@@ -42,8 +43,10 @@ def _write_doc_content_file(title: str, content: str, *, doc_format: str) -> Pat
             body = f"# {title}\n\n{body}" if body else f"# {title}"
     else:
         body = content.strip()
+        if body.startswith("<doc>") and body.endswith("</doc>"):
+            body = body[len("<doc>") : -len("</doc>")].strip()
         if "<title" not in body[:500]:
-            body = f"<doc><title>{_xml_text(title)}</title>{body}</doc>" if body else f"<doc><title>{_xml_text(title)}</title></doc>"
+            body = f"<title>{_xml_text(title)}</title>{body}" if body else f"<title>{_xml_text(title)}</title>"
     path.write_text(body, encoding="utf-8")
     return path
 
@@ -73,8 +76,18 @@ def send_text_as_bot(chat_id: str, text: str, *, identity: str = "bot", dry_run:
         text,
     ]
     if idempotency_key:
-        command.extend(["--idempotency-key", idempotency_key])
+        command.extend(["--idempotency-key", _normalize_idempotency_key(idempotency_key)])
     return _run_json(command, timeout=60, dry_run=dry_run)
+
+
+def _normalize_idempotency_key(key: str) -> str:
+    normalized = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in key).strip("-")
+    if not normalized:
+        normalized = uuid.uuid4().hex
+    if len(normalized) <= 50:
+        return normalized
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    return f"{normalized[:41]}-{digest}"
 
 
 def extract_doc_url(result: dict[str, Any]) -> str | None:
