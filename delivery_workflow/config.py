@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -10,14 +9,6 @@ WORKSPACE_CONFIG_NAME = "workflow.config.json"
 PLUGIN_CONFIG_NAME = "delivery-workflow.config.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PLUGIN_ROOT = PACKAGE_ROOT.parent
-
-# Mapping from env var to config path (list of keys).
-# Loaded from .env file at plugin root, overrides config.json values.
-_ENV_CONFIG_MAP: dict[str, list[str]] = {
-    "LARK_APP_ID": ["lark", "sdk", "app_id"],
-    "LARK_APP_SECRET": ["lark", "sdk", "app_secret"],
-    "LARK_CHAT_ID": ["lark", "chat_id"],
-}
 
 DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
     "storage": {
@@ -64,24 +55,7 @@ DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
     "lark": {
         "enabled": True,
         "identity": "bot",
-        "dry_run": False,
-        "send_step_notifications": True,
-        "send_prd_approval_card": True,
-        "create_prd_doc_without_chat": False,
-        "prd_doc_title_template": "{project_title}PRD",
-        "sender": {
-            "mode": "current_process",
-            "on_keychain_error": "host_escalation",
-        },
-        "sdk": {
-            "credential_source": "lark-cli",
-            "profile": "",
-            "log_level": "info",
-        },
-        "event": {
-            "transport": "sdk_websocket",
-            "auto_start_consumer": True,
-        },
+        "chat_id": "",
     },
 }
 
@@ -93,9 +67,6 @@ def load_config() -> dict[str, Any]:
             f"missing {WORKSPACE_CONFIG_NAME}; run `python3 -m delivery_workflow.cli config init` in the project workspace"
         )
     config = _read_json(path)
-    _remove_sensitive_lark_config(config)
-    from_env = _load_env_layers(path)
-    _apply_env_overrides(config, from_env)
     return config
 
 
@@ -190,10 +161,6 @@ def lark_chat_id(config: dict[str, Any], project_chat_id: str | None = None) -> 
     return str(value).strip() if value else None
 
 
-def lark_dry_run(config: dict[str, Any]) -> bool:
-    return bool(lark_config(config).get("dry_run"))
-
-
 def lark_enabled(config: dict[str, Any]) -> bool:
     return bool(lark_config(config).get("enabled", True))
 
@@ -228,61 +195,3 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"config must be a JSON object: {path}")
     return data
-
-
-def _load_env_layers(config_path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if config_path.resolve() == (PLUGIN_ROOT / PLUGIN_CONFIG_NAME).resolve():
-        values.update(_read_dotenv(PLUGIN_ROOT / ".env"))
-    values.update(_read_dotenv(Path.cwd() / ".env"))
-    return values
-
-
-def _read_dotenv(env_file: Path) -> dict[str, str]:
-    """Load KEY=VALUE pairs from .env. No dependency on python-dotenv."""
-    if not env_file.exists():
-        return {}
-    overrides: dict[str, str] = {}
-    for line in env_file.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in stripped:
-            continue
-        key, _, value = stripped.partition("=")
-        key = key.strip()
-        value = value.strip()
-        if key and value:
-            overrides[key] = value
-    return overrides
-
-
-def _apply_env_overrides(config: dict[str, Any], env_vals: dict[str, str] | None = None) -> None:
-    """Merge env values into config, taking precedence over config.json values.
-    Checks both the provided dict (from .env file) and os.environ (always).
-    The current project .env takes precedence over process-wide environment
-    values because one shell or lark-cli installation may serve many projects.
-    """
-    for env_key, config_path in _ENV_CONFIG_MAP.items():
-        value = (env_vals or {}).get(env_key) or os.environ.get(env_key)
-        if value:
-            _deep_set(config, config_path, value)
-
-
-def _remove_sensitive_lark_config(config: dict[str, Any]) -> None:
-    lark = config.get("lark")
-    if not isinstance(lark, dict):
-        return
-    lark.pop("chat_id", None)
-    sdk = lark.get("sdk")
-    if isinstance(sdk, dict):
-        sdk.pop("app_id", None)
-        sdk.pop("app_secret", None)
-
-
-def _deep_set(config: dict[str, Any], path: list[str], value: str) -> None:
-    """Set a nested dict value by key path, creating intermediate dicts as needed."""
-    node = config
-    for key in path[:-1]:
-        if key not in node or not isinstance(node.get(key), dict):
-            node[key] = {}
-        node = node[key]
-    node[path[-1]] = value

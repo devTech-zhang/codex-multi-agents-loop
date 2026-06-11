@@ -1,6 +1,6 @@
 # Delivery Workflow
 
-A general-purpose software delivery Workflow Worker and multi-agent orchestration plugin. It organizes requirements, PRDs, reviews, design, development, testing, bug fixes, and final delivery reports into a traceable, recoverable, auditable file-based process.
+A general-purpose software delivery Workflow Worker and multi-agent orchestration plugin. It turns requirements, PRDs, reviews, design, development, testing, bug fixing, and final reports into a traceable, recoverable, auditable local project workflow.
 
 <!-- README-I18N:START -->
 
@@ -9,36 +9,37 @@ A general-purpose software delivery Workflow Worker and multi-agent orchestratio
 <!-- README-I18N:END -->
 
 > [!NOTE]
-> Currently supports Codex and Claude Code, and is designed for orchestrating end-to-end software delivery from a local business project workspace.
+> Currently supports Codex and Claude Code. Each business workspace is treated as one independent project; workflow state, artifacts, and source code stay inside that directory.
 
 ## Why It Exists
 
-AI agents are good at generating content, but software delivery also needs deterministic state transitions, approval boundaries, artifact archiving, and quality release gates. Delivery Workflow lets agents own thinking and generation while the Workflow Worker owns state and evidence.
+AI agents are good at generating content, but software delivery also needs deterministic state transitions, human confirmation boundaries, artifact archiving, and quality release gates. Delivery Workflow lets agents handle understanding, generation, and execution while the Workflow Worker owns state, evidence, gates, and quality thresholds.
 
 - File-based workflow: `delivery_workflow/workflow.yaml` is the single source of process truth.
 - Project-level state: SQLite stores runs, jobs, gates, and events; the filesystem stores artifacts.
-- Clear boundaries: interactive gates, automated steps, and notification steps are separated.
-- Real quality gates: frontend/backend development flows into developer self-test, QA system testing, bug-fix, and regression loops until thresholds pass.
-- Feishu/Lark approval: PRD v2 can be published as a Feishu/Lark document and approved through an interactive card.
-- Host hooks: records file writes, command execution, and Stop events as evidence for whether self-tests really ran.
+- Pre-development confirmation: PRD, UI spec, technical designs, and smoke cases are published to Feishu/Lark before the workflow stops at a human confirmation gate.
+- Real quality gates: QA system or regression testing loops through bug-fix until thresholds pass.
+- Feishu/Lark archiving: Feishu/Lark fully relies on local `lark-cli` configuration.
+- Host hooks: record file writes, command execution, and Stop events as evidence for whether self-tests and QA actually ran.
 
 ## Workflow Overview
 
 ```text
-Requirement intake
-  -> PRD v1
+PRD v1
   -> Multi-role requirement review
-  -> PRD v2
-  -> Feishu/Lark PRD approval
+  -> Final PRD
   -> UI design specification
-  -> Frontend/backend technical designs
-  -> Technical design review
-  -> Development task breakdown
+  -> Frontend technical design
+  -> Backend technical design (skipped when backend is not needed)
+  -> QA smoke test cases
+  -> Publish Feishu/Lark documents and open pre-development confirmation gate
   -> Frontend development
-  -> Backend development
-  -> Developer self-test
+  -> Backend development (skipped when backend is not needed)
+  -> Frontend/backend integration
+  -> Developer smoke self-test
   -> QA system testing
   -> bug-fix <-> QA regression testing
+  -> QA test report
   -> Final delivery report
 ```
 
@@ -55,18 +56,17 @@ Default quality gate:
 
 ```text
 .
-├── .codex-plugin/                  # Codex plugin manifest and MCP config
-├── .claude-plugin/                 # Claude Code plugin manifest
-├── hooks/                          # Claude/Codex host hooks
-├── delivery_workflow/              # Python core, CLI, MCP server, workflow definition
-├── skills/delivery-workflow/       # Codex skill entrypoint
-├── scripts/                        # Local command wrappers
-├── tests/                          # Unit tests
-├── delivery-workflow.config.json   # Plugin-level default config template
+├── .codex-plugin/
+├── .claude-plugin/
+├── hooks/
+├── delivery_workflow/
+├── skills/delivery-workflow/
+├── tests/
+├── delivery-workflow.config.json
 └── pyproject.toml
 ```
 
-After initialization in a business project, the default layout is:
+After initialization in a business project:
 
 ```text
 .delivery-workflow/
@@ -75,146 +75,138 @@ After initialization in a business project, the default layout is:
 delivery-project/
 source-code/
 workflow.config.json
-.env
 ```
 
 ## Quick Start
 
-### Install As A Codex Or Claude Code Plugin
-
-#### Codex CLI
+### Codex CLI
 
 ```bash
-# 1. Add the plugin marketplace
 codex plugin marketplace add https://github.com/devTech-zhang/multi-agent-delivery-workflow.git --ref main
-
-# 2. Install/enable the plugin
-codex plugin add delivery-workflow@delivery-workflow-marketplace
-
-# 3. Check installation
+codex plugin add delivery-workflow@devTech-Zhang
 codex plugin list | grep delivery-workflow
-
-# 4. Update the plugin
-codex plugin marketplace upgrade delivery-workflow-marketplace
-codex plugin add delivery-workflow@delivery-workflow-marketplace
 ```
 
-#### Claude Code CLI
+Update:
 
 ```bash
-# 1. Add the plugin marketplace
+codex plugin marketplace upgrade delivery-workflow-marketplace
+codex plugin add delivery-workflow@devTech-Zhang
+```
+
+### Claude Code CLI
+
+```bash
 claude plugin marketplace add https://github.com/devTech-zhang/multi-agent-delivery-workflow.git#main
-
-# 2. Install the plugin with default user scope
-claude plugin install delivery-workflow@delivery-workflow-marketplace
-
-# 3. Check installation
+claude plugin install delivery-workflow@devTech-Zhang
 claude plugin marketplace list
 claude plugin list
+```
 
-# 4. Update the marketplace
+Update:
+
+```bash
 claude plugin marketplace update delivery-workflow-marketplace
-
-# 5. Update the plugin
-claude plugin update delivery-workflow@delivery-workflow-marketplace
+claude plugin update delivery-workflow@devTech-Zhang
 ```
 
 ### Initialize And Create A Project
 
-From your business project workspace, ask the AI to initialize and create a project with the plugin tools. For example:
+From your business project workspace, ask the AI to call the plugin tools:
 
-> "Initialize the project"
-> then
-> "Create a new project: build an admin system. Detailed features: xxxxxx"
+```text
+Initialize project config.
+Create a new project: build a TODO H5 app with add, complete, delete, and local persistence.
+```
 
-Then wait for the AI agents to complete the workflow.
+By default, the workflow advances to the pre-development document confirmation gate. After reviewing the PRD, UI spec, technical designs, and smoke cases in Feishu/Lark documents, ask the AI to continue development. If the documents need changes, describe what to revise and the workflow will loop back through document updates.
 
 ## MCP Tools
 
-Common MCP tools exposed by the plugin:
-
-| User intent | MCP tool |
-| ----------- | -------- |
-| Initialize current project config | `delivery_init_project_config` |
-| Create a delivery project | `delivery_create_project` |
-| Check current project status | `delivery_get_current_project_status` |
-| Delete current project | `delivery_delete_current_project` |
-| Advance one worker job | `delivery_worker_once` |
-| Advance until blocked, idle, or failed | `delivery_worker_until_blocked` |
-| Wait for Feishu/Lark approval callback | `delivery_watch_run` |
-| Trigger a manual bug-fix workflow | `delivery_request_bug_fix` |
-| Inspect artifacts | `delivery_list_artifacts` / `delivery_read_artifact` |
+| User intent                             | MCP tool                                             |
+| --------------------------------------- | ---------------------------------------------------- |
+| Initialize current project config       | `delivery_init_project_config`                       |
+| Create a delivery project               | `delivery_create_project`                            |
+| Check current project status            | `delivery_get_current_project_status`                |
+| Delete current project with backup      | `delivery_delete_current_project`                    |
+| Advance one worker job                  | `delivery_worker_once`                               |
+| Advance until blocked, idle, or failed  | `delivery_worker_until_blocked`                      |
+| Wait for gate submission and settlement | `delivery_watch_run`                                 |
+| Trigger a manual bug-fix workflow       | `delivery_request_bug_fix`                           |
+| Inspect artifacts                       | `delivery_list_artifacts` / `delivery_read_artifact` |
 
 ## Configuration
 
-The project reads `workflow.config.json` directly from the current project directory. `config init` copies it into the business project directory.
+The project reads `workflow.config.json` from the current project directory. `config init` copies the plugin default config into the business workspace.
 
-Common config:
+Feishu/Lark config supports:
 
 ```json
 {
-    "quality_gate": {
-        "block": 0,
-        "critical": 0,
-        "major": 2,
-        "minor": 5
-    },
-    "workflow": {
-        "auto_start": true,
-        "auto_run_to_gate": true,
-        "continue_after_gate": true
-    },
-    "code_platforms": {
-        "default": "codex",
-        "frontend": "codex",
-        "backend": "claude-code",
-        "enable_agent_cli": false
-    },
     "lark": {
-        "dry_run": false,
-        "send_step_notifications": true,
-        "send_prd_approval_card": true
+        "enabled": true,
+        "identity": "bot",
+        "chat_id": "oc_xxx"
     }
 }
 ```
 
-Configure Feishu/Lark bot credentials in `.env`:
+- `enabled=true`: create Feishu/Lark documents.
+- `enabled=false`: skip Feishu/Lark actions and keep only local artifacts.
+- `identity`: passed to `lark-cli --as`; use `bot` or `user`.
+- `chat_id`: optional project group ID; the default template keeps it empty, and each business project can fill it in when needed.
+
+If `lark_chat_id` / `--lark-chat-id` is also provided at project creation time, the creation parameter takes precedence. CLI example:
 
 ```bash
-LARK_APP_ID=cli_xxxxxxxxxxxxxxxx
-LARK_APP_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-LARK_CHAT_ID=oc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+python3 -m delivery_workflow.cli project create \
+  --title "TODO H5" \
+  --requirement "Build a TODO H5 app" \
+  --lark-chat-id "oc_xxx"
 ```
 
-## Feishu/Lark Approval
-
-PRD v2 is organized as a Markdown file with a real title and table structure, then published through `lark-cli docs +create --content @file --doc-format markdown` to avoid failures caused by passing long document bodies directly as command arguments.
-
-The approval card includes:
-
-- PRD document link
-- Approve button
-- Reject button
-- Rejection reason input
-
-The consumer only listens for `card.action.trigger`:
+Feishu/Lark credentials are fully managed by local `lark-cli`:
 
 ```bash
-python3 -m delivery_workflow.cli lark event-consumer
+npx @larksuite/cli@latest install
+lark-cli config init --new
+lark-cli auth login --recommend
+lark-cli auth status
 ```
 
-After a callback arrives, the workflow submits the `prd-approval` gate and automatically starts the background worker when `workflow.continue_after_gate=true`.
+## Feishu/Lark Document Publishing
+
+Before development, the workflow publishes:
+
+- `{Project Name} PRD`
+- `{Project Name} UI Design Specification`
+- `{Project Name} Frontend Technical Design`
+- `{Project Name} Backend Technical Design` (skipped when backend is not needed)
+- `{Project Name} Smoke Test Cases`
+
+Later it also publishes:
+
+- `{Project Name} Test Report`
+- `{Project Name} Final Delivery Report`
+
+Document content is composed as XML and sent through `lark-cli docs +create --content @file --doc-format xml`, avoiding command-line corruption for long bodies and tables.
+
+Group messages are limited to three stages:
+
+- `{Project Name} project has been created and is in progress.`
+- Before development, one message lists PRD, UI spec, technical design, and smoke test case document links.
+- After completion, one message lists the test report and final delivery report links.
 
 ## Host Hooks
 
 The plugin ships Claude Code / Codex host hooks for execution evidence. Hooks do not automatically advance workflow state.
 
-| Hook | Purpose |
-| ---- | ------- |
-| `PreToolUse Bash` | Blocks obviously dangerous commands and commands that may expose `.env` / secrets |
-| `PostToolUse Write/Edit/MultiEdit` | Records files actually written by the agent |
-| `PostToolUse Bash` | Records executed commands and classifies installs, builds, tests, Playwright, API checks, and more |
-| `Stop` | Records the end of an agent turn |
+| Hook                               | Purpose                                                                                            |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `PreToolUse Bash`                  | Blocks obviously dangerous commands and commands that may expose secrets                           |
+| `PostToolUse Write/Edit/MultiEdit` | Records files actually written by the agent                                                        |
+| `PostToolUse Bash`                 | Records executed commands and classifies installs, builds, tests, Playwright, API checks, and more |
+| `Stop`                             | Records the end of an agent turn                                                                   |
 
 Evidence is written to:
 
@@ -225,27 +217,10 @@ Evidence is written to:
 
 ## Development And Verification
 
-Run tests:
-
 ```bash
 python3 -m unittest tests.test_core
-python3 -m py_compile delivery_workflow/*.py
+python3 -m compileall delivery_workflow
 git diff --check
-```
-
-Run the Feishu/Lark smoke test:
-
-```bash
-scripts/lark-e2e-smoke --live --actions approve,reject
-```
-
-Install `lark-cli` through the official AI Agent quick start when missing:
-
-```bash
-npx @larksuite/cli@latest install
-lark-cli config init --new
-lark-cli auth login --recommend
-lark-cli auth status
 ```
 
 ## Design Principles

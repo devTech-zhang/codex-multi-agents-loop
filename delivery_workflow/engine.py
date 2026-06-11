@@ -1,26 +1,21 @@
 from __future__ import annotations
 
 import json
-import os
 import re
-import shlex
 import shutil
 import time
 import zipfile
-from contextlib import contextmanager
 from html import escape
 from pathlib import Path
 from typing import Any
 
 from .capabilities import lark_doc_capability
-from .config import WORKSPACE_CONFIG_NAME, code_platform_for_step, lark_chat_id as config_lark_chat_id, lark_config, lark_dry_run as config_lark_dry_run, lark_enabled, lark_identity, load_config, quality_gate_config, write_workspace_config
+from .config import WORKSPACE_CONFIG_NAME, code_platform_for_step, lark_chat_id as config_lark_chat_id, lark_enabled, lark_identity, load_config, quality_gate_config, write_workspace_config
 from .definitions import WorkflowDefinition, list_workflows, load_workflow
-from .lark import build_prd_approval_resolved_card, create_doc_as_bot, extract_doc_url, lark_available, send_approval_card_as_bot, send_text_as_bot
-from .lark_daemon import ensure_lark_event_consumer
+from .lark import create_doc_as_bot, extract_doc_url, send_text_as_bot
 from .paths import DEFAULT_WORKFLOW_ID, PLUGIN_ROOT, artifact_root, source_root
 from .platforms import build_agent_command, execution_needs_permission, maybe_run_command, select_dev_executor
 from .storage import connect, new_id, now_iso, row_dict, row_dicts
-from .worker_daemon import start_worker_continuation
 from .workflow_log import log_workflow
 
 
@@ -136,12 +131,12 @@ def create_project(
         "项目已创建，Worker 自动启动并进入 PRD v1 流程。",
         {"project_id": project_id, "start_step": start_step},
     )
-    _send_lark_text(get_run(run_id), f"{project_title} 项目已创建。", event_key=f"{run_id}:project-created")
+    _send_lark_text(get_run(run_id), f"{project_title} 项目已创建，正在进行中....", event_key=f"{run_id}:project-created")
     if auto_start:
         enqueue_step(run_id, start_step)
     auto_run_result = None
     if auto_start and auto_run_to_gate:
-        auto_run_result = run_worker_until_blocked(run_id=run_id, stop_steps={"prd-approval"}, max_jobs=20)
+        auto_run_result = run_worker_until_blocked(run_id=run_id, stop_steps={"development-doc-confirmation"}, max_jobs=30)
     result = {
         "project_id": project_id,
         "run_id": run_id,
@@ -417,7 +412,7 @@ def execute_step(run_id: str, step_id: str, payload: dict[str, Any] | None = Non
             result = _run_system_step(run_id, step)
         _mark_step(run_id, step, "completed", result)
         _notify_step(run, step, "completed", result)
-        next_step = _next_step(step, result)
+        next_step = _next_step(run_id, step, result)
         _move_to_next(run_id, next_step)
         if next_step:
             enqueue_step(run_id, next_step)
@@ -460,7 +455,7 @@ def submit_gate(run_id: str, step_id: str, data: dict[str, Any]) -> dict[str, An
         created_by="workflow",
     )
     _mark_step(run_id, step, "completed", {"gate": data})
-    next_step = _next_step(step, data)
+    next_step = _next_step(run_id, step, data)
     _move_to_next(run_id, next_step)
     if next_step:
         enqueue_step(run_id, next_step)
@@ -469,49 +464,6 @@ def submit_gate(run_id: str, step_id: str, data: dict[str, Any]) -> dict[str, An
     result = {"ok": True, "run_id": run_id, "step_id": step_id, "next_step": next_step}
     log_workflow("gate.submitted", "Gate 已提交。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload={"data": data, "result": result})
     return result
-
-
-def handle_lark_card_event(payload: dict[str, Any]) -> dict[str, Any]:
-    value = _extract_lark_action_value(payload)
-    action = value.get("action")
-    if action not in {"approve_prd", "reject_prd"}:
-        raise WorkflowError(f"unsupported lark card action: {action}")
-    run_id = value.get("run_id")
-    step_id = value.get("step_id") or "prd-approval"
-    if not isinstance(run_id, str) or not run_id:
-        raise WorkflowError("lark card event missing run_id")
-    approved = bool(value.get("approved"))
-    approver = _extract_lark_operator(payload)
-    reason = _extract_lark_approval_reason(payload, value)
-    if not approved and not reason:
-        raise WorkflowError("拒绝 PRD 时必须填写拒绝理由")
-    comment = reason or "通过"
-    with _temporary_lark_workspace(value):
-        run = get_run(run_id)
-        _validate_lark_approval_card_current(run_id, value)
-        result = submit_gate(
-            run_id,
-            step_id,
-            {
-                "approved": approved,
-                "approver": approver,
-                "comment": comment,
-            },
-        )
-        resolved_card = build_prd_approval_resolved_card(
-            project_title=run["project"]["title"],
-            project_id=run["project_id"],
-            run_id=run_id,
-            doc_url=str(value.get("doc_url") or ""),
-            approved=approved,
-            reason=comment,
-            approver=approver,
-            approval_round=_latest_prd_approval_round(run_id),
-        )
-        emit_event(run_id, "lark.card_event.handled", f"飞书审批卡片事件已处理: {action}", {"action": action, "approved": approved, "reason": comment})
-        continuation = start_worker_continuation(run_id, reason=f"lark-card:{action}")
-        emit_event(run_id, "workflow.continuation.started" if continuation.get("ok") else "workflow.continuation.failed", "飞书审批回调已触发 workflow 后续推进。", continuation)
-    return {"ok": True, "action": action, "approved": approved, "reason": comment, "approver": approver, "gate": result, "response_card": resolved_card, "continuation": continuation}
 
 
 def watch_run(
@@ -533,7 +485,7 @@ def watch_run(
     while True:
         current_status = status(run_id)
         new_events = _events_since(run_id, started_at)
-        gate_events = [event for event in new_events if event["event_type"] in {"gate.submitted", "lark.card_event.handled", "workflow.continuation.started", "workflow.continuation.failed"}]
+        gate_events = [event for event in new_events if event["event_type"] in {"gate.submitted"}]
         if gate_events:
             observed_events = gate_events
         if time.monotonic() >= deadline:
@@ -545,9 +497,6 @@ def watch_run(
                 "status": current_status,
                 "events": observed_events or new_events,
             }
-        if observed_events and _watch_should_continue_waiting_for_reapproval(current_status, observed_events):
-            time.sleep(max(interval, 0.2))
-            continue
         if observed_events and _watch_status_is_settled(current_status):
             return {
                 "ok": True,
@@ -567,19 +516,6 @@ def watch_run(
                 "events": new_events,
             }
         time.sleep(max(interval, 0.2))
-
-
-def retry_prd_approval_lark(run_id: str) -> dict[str, Any]:
-    run = get_run(run_id)
-    definition = load_workflow(run["workflow_id"])
-    step = definition.step("prd-approval")
-    try:
-        read_artifact(run_id, "prd_v2")
-    except WorkflowError as exc:
-        raise WorkflowError("cannot retry PRD approval lark actions before prd_v2 exists") from exc
-    result = _publish_prd_v2_doc_and_send_approval(run_id, step)
-    emit_event(run_id, "lark.prd_approval.retry", "已重试 PRD v2 飞书文档和审批卡片发送。", result)
-    return {"ok": bool(result.get("ok")), "run_id": run_id, "result": result}
 
 
 def status(run_id: str) -> dict[str, Any]:
@@ -613,35 +549,6 @@ def _watch_status_is_settled(current_status: dict[str, Any]) -> bool:
         return True
     run_status = (current_status.get("run") or {}).get("status")
     return run_status in {"completed", "failed"} or not active_jobs
-
-
-def _watch_should_continue_waiting_for_reapproval(current_status: dict[str, Any], events: list[dict[str, Any]]) -> bool:
-    current_step = (current_status.get("run") or {}).get("current_step")
-    if current_step != "prd-approval":
-        return False
-    gates = current_status.get("gates", [])
-    if not any(gate.get("step_id") == "prd-approval" and gate.get("status") == "open" for gate in gates):
-        return False
-    approved = _latest_approval_event_result(events)
-    return approved is False
-
-
-def _latest_approval_event_result(events: list[dict[str, Any]]) -> bool | None:
-    for event in reversed(events):
-        payload = event.get("payload_json")
-        if isinstance(payload, str):
-            try:
-                payload = json.loads(payload)
-            except json.JSONDecodeError:
-                payload = {}
-        if not isinstance(payload, dict):
-            continue
-        if "approved" in payload:
-            return bool(payload.get("approved"))
-        gate = payload.get("gate")
-        if isinstance(gate, dict) and "approved" in gate:
-            return bool(gate.get("approved"))
-    return None
 
 
 def write_artifact(
@@ -721,7 +628,6 @@ def workflows() -> list[dict[str, str]]:
 
 def _open_gate(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
     schema = step.get("gate", {}).get("schema", {})
-    lark_result = _publish_prd_v2_doc_and_send_approval(run_id, step) if step["id"] == "prd-approval" else None
     ts = now_iso()
     with connect() as conn:
         conn.execute(
@@ -743,8 +649,6 @@ def _open_gate(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
         "schema": schema,
         "actions": step.get("gate", {}).get("actions", []),
     }
-    if lark_result is not None:
-        card["lark"] = lark_result
     emit_event(run_id, "gate.opened", f"gate {step['id']} opened", card)
     return {"blocked": True, "gate": card}
 
@@ -787,7 +691,7 @@ def _run_dev_step(run: dict[str, Any], definition: WorkflowDefinition, step: dic
     _log_agent_execution(run, step, executor, execution)
     _ensure_agent_execution_completed(execution, step["id"])
     _ensure_dev_execution_verified(execution, step["id"])
-    if step["id"] == "regression-testing" and not execution.get("executed"):
+    if step["id"] in {"qa-system-testing", "qa-regression-testing"} and not execution.get("executed"):
         raise WorkflowError(f"{step['id']} requires real QA execution before quality gate evaluation: {execution.get('reason') or 'agent CLI not executed'}")
     result_name = step.get("outputs", [f"{step['id']}_result"])[0]
     result = write_artifact(
@@ -798,7 +702,7 @@ def _run_dev_step(run: dict[str, Any], definition: WorkflowDefinition, step: dic
         created_by=f"{executor}-adapter",
     )
     payload: dict[str, Any] = {"executor": executor, "task_package": package, "execution": execution, "result": result}
-    if step["id"] == "regression-testing":
+    if step["id"] in {"qa-system-testing", "qa-regression-testing"}:
         quality_gate = _evaluate_quality_gate(run["id"], result_name)
         payload["quality_gate"] = quality_gate
         payload["can_proceed"] = quality_gate["passed"]
@@ -868,16 +772,19 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
         return result
     if not capability["ok"]:
         raise WorkflowError(f"缺少飞书文档能力: {capability['install_hint']}")
-    default_title = "{project_title}最终交付报告" if source_name == "final_delivery_report" else "{project_title}" + step["name"]
-    title_template = str(step.get("title_template") or lark_config(config).get("final_report_doc_title_template") or default_title)
+    default_title = "{project_title} 最终交付报告" if source_name == "final_delivery_report" else "{project_title} " + step["name"]
+    title_template = str(step.get("title_template") or default_title)
     title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
-    publish_content = _compose_generic_lark_doc_source(run_id, source_name, source["content"], step)
-    result = create_doc_as_bot(title, publish_content, identity=lark_identity(config), dry_run=config_lark_dry_run(config), doc_format="markdown")
+    if source_name == "prd_v2":
+        publish_content = _compose_prd_v2_lark_markdown(run_id, source["content"])
+        publish_xml = _compose_prd_v2_lark_xml(title, run_id, source["content"])
+    else:
+        publish_content = _compose_generic_lark_doc_source(run_id, source_name, source["content"], step)
+        publish_xml = _compose_lark_doc_xml(title, publish_content)
+    result = create_doc_as_bot(title, publish_xml, identity=lark_identity(config), dry_run=False, doc_format="xml")
     if not result.get("ok"):
         raise WorkflowError(f"飞书文档创建失败: {json.dumps(result, ensure_ascii=False)[-800:]}")
     doc_url = extract_doc_url(result)
-    if not doc_url and config_lark_dry_run(config):
-        doc_url = f"dry-run://lark-doc/{run['project_id']}/final-report"
     output_artifact = step.get("output_artifact", "final_report_lark_doc")
     artifact = write_artifact(
         run_id,
@@ -903,119 +810,25 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
         category="lark-doc",
         created_by="workflow",
     )
+    write_artifact(
+        run_id,
+        f"{output_artifact}_xml",
+        publish_xml,
+        category="lark-doc",
+        created_by="workflow",
+    )
     _append_lark_doc_manifest(run_id, title=title, source_artifact=source_name, doc_url=doc_url, artifact_name=output_artifact)
-    if doc_url:
-        _send_lark_text(run, f"{_lark_doc_publish_label(source_name, step)}飞书文档已发布：{doc_url}", event_key=f"{run_id}:{output_artifact}:published")
     return {"capability": capability, "artifact": artifact, "doc_url": doc_url, "lark_cli": result}
 
 
 def _notify(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
     message = step.get("message", f"{step['name']} completed")
     emit_event(run_id, "notification", message, {"step_id": step["id"]})
-    _send_lark_text(get_run(run_id), message, event_key=f"{run_id}:{step['id']}:notify")
+    if step["id"] == "delivery-notification":
+        run = get_run(run_id)
+        final_message = _compose_final_delivery_notification(run_id, run["project"]["title"])
+        _send_lark_text(run, final_message, event_key=f"{run_id}:{step['id']}:notify")
     return {"message": message}
-
-
-def _publish_prd_v2_doc_and_send_approval(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
-    config = load_config()
-    lark = lark_config(config)
-    run = get_run(run_id)
-    chat_id = _lark_chat_id(run)
-    dry_run = _lark_dry_run()
-    if not lark_enabled(config):
-        result = {"ok": True, "skipped": True, "reason": "lark disabled by config"}
-        emit_event(run_id, "lark.prd_approval.skipped", "配置已关闭飞书动作，未创建 PRD 飞书文档和审批卡片。", result)
-        return result
-    if not chat_id and not bool(lark.get("create_prd_doc_without_chat")):
-        result = {"ok": True, "skipped": True, "reason": "missing lark chat_id"}
-        emit_event(run_id, "lark.prd_approval.skipped", "未配置飞书群聊，跳过 PRD 文档和审批卡片。", result)
-        return result
-    if not dry_run and not lark_available():
-        result = {"ok": False, "skipped": True, "reason": "lark-cli not found; run doctor and install via npx @larksuite/cli@latest install"}
-        emit_event(run_id, "lark.prd_approval.skipped", "缺少 lark-cli，未创建 PRD 飞书文档和审批卡片。", result)
-        return result
-
-    prd_v2 = read_artifact(run_id, "prd_v2")
-    prd_doc_markdown = _compose_prd_v2_lark_markdown(run_id, prd_v2["content"])
-    approval_round = int(prd_v2.get("version") or 1)
-    title_template = str(lark.get("prd_doc_title_template") or "{project_title}PRD")
-    title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
-    _send_lark_text(run, f"PRD v2 已生成，开始创建飞书文档：{title}", event_key=f"{run_id}:prd-v2-doc:start")
-    doc_result = create_doc_as_bot(title, prd_doc_markdown, identity=lark_identity(config), dry_run=dry_run, doc_format="markdown")
-    doc_url = extract_doc_url(doc_result)
-    if not doc_url and dry_run:
-        doc_url = f"dry-run://lark-doc/{run['project_id']}/prd-v2"
-    doc_artifact = write_artifact(
-        run_id,
-        "prd_v2_lark_doc",
-        json.dumps({"title": title, "url": doc_url, "source_artifact": "prd_v2", "result": doc_result}, ensure_ascii=False, indent=2),
-        category="prd",
-        created_by="lark-bot",
-    )
-    write_artifact(run_id, "prd_v2_lark_markdown", prd_doc_markdown, category="prd", created_by="workflow")
-    _append_lark_doc_manifest(run_id, title=title, source_artifact="prd_v2", doc_url=doc_url, artifact_name="prd_v2_lark_doc")
-    if not doc_result.get("ok"):
-        payload = {"result": doc_result}
-        if doc_result.get("error_type") == "keychain_unavailable":
-            payload["retry_command"] = _host_lark_retry_command(run_id)
-            payload["host_escalation"] = _host_escalation_payload(payload["retry_command"])
-        emit_event(run_id, "lark.prd_doc.failed", "PRD v2 飞书文档创建失败。", payload)
-        return {"ok": False, "doc": doc_artifact, "doc_result": doc_result}
-    if not chat_id:
-        result = {"ok": True, "doc": doc_artifact, "doc_url": doc_url, "card_skipped": True, "reason": "missing lark_chat_id"}
-        emit_event(run_id, "lark.prd_approval.doc_created", "PRD v2 飞书文档已创建，未配置飞书群聊所以未发送审批卡片。", result)
-        return result
-    if not doc_url:
-        result = {"ok": False, "doc": doc_artifact, "card_skipped": True, "reason": "lark doc url missing", "doc_result": doc_result}
-        emit_event(run_id, "lark.prd_approval.card_skipped", "PRD v2 飞书文档 URL 缺失，未发送审批卡片。", result)
-        return result
-
-    if not bool(lark.get("send_prd_approval_card", True)):
-        result = {"ok": True, "doc": doc_artifact, "doc_url": doc_url, "card_skipped": True, "reason": "approval card disabled by config"}
-        emit_event(run_id, "lark.prd_approval.card_skipped", "配置已关闭 PRD 审批卡片发送。", result)
-        return result
-    rejection_reason = _latest_prd_rejection_reason(run_id)
-    if approval_round > 1 and rejection_reason:
-        _send_lark_text(
-            run,
-            f"PRD v2 已按照拒绝原因：{rejection_reason} 修改，准备发起第 {approval_round} 轮复审。",
-            event_key=f"{run_id}:prd-approval-card:review-round-{approval_round}:start",
-        )
-    listener_result = ensure_lark_event_consumer(run_id)
-    emit_event(
-        run_id,
-        "lark.event_consumer.ready" if listener_result.get("ok") else "lark.event_consumer.failed",
-        "飞书审批按钮长连接监听已就绪。" if listener_result.get("ok") else "飞书审批按钮长连接监听未启动成功。",
-        listener_result,
-    )
-    _send_lark_text(run, f"开始发送 PRD 审批卡片，文档链接：{doc_url}", event_key=f"{run_id}:prd-approval-card:start")
-    card_result = send_approval_card_as_bot(
-        chat_id=chat_id,
-        project_title=run["project"]["title"],
-        project_id=run["project_id"],
-        run_id=run_id,
-        step_id=step["id"],
-        doc_url=doc_url,
-        identity=lark_identity(config),
-        dry_run=dry_run,
-        idempotency_key=_approval_card_idempotency_key(run_id, approval_round, int(doc_artifact["version"])),
-        workspace=str(Path.cwd()),
-        approval_round=approval_round,
-    )
-    card_artifact = write_artifact(
-        run_id,
-        "prd_approval_card_message",
-        json.dumps({"chat_id": chat_id, "doc_url": doc_url, "result": card_result}, ensure_ascii=False, indent=2),
-        category="approval",
-        created_by="lark-bot",
-    )
-    message = "PRD v2 飞书文档和审批卡片已发送。" if card_result.get("ok") else "PRD v2 飞书审批卡片发送失败。"
-    payload = {"doc_url": doc_url, "card_result": card_result, "listener": listener_result}
-    if card_result.get("error_type") == "keychain_unavailable":
-        payload["retry_command"] = _host_lark_retry_command(run_id)
-        payload["host_escalation"] = _host_escalation_payload(payload["retry_command"])
-    emit_event(run_id, "lark.prd_approval.card_sent" if card_result.get("ok") else "lark.prd_approval.card_failed", message, payload)
-    return {"ok": bool(card_result.get("ok")), "doc": doc_artifact, "doc_url": doc_url, "card": card_artifact, "card_result": card_result, "listener": listener_result}
 
 
 def _execution_policy(config: dict[str, Any]) -> dict[str, Any]:
@@ -1117,7 +930,7 @@ def _dev_result_content(
     package: dict[str, Any],
     execution: dict[str, Any],
 ) -> str:
-    if step["id"] in {"frontend-development", "backend-development", "development-self-test", "regression-testing", "bug-fix"} and execution.get("executed"):
+    if step["id"] in {"frontend-development", "backend-development", "frontend-backend-integration", "development-smoke-self-test", "qa-system-testing", "qa-regression-testing", "bug-fix"} and execution.get("executed"):
         stdout = str(execution.get("stdout") or "").strip()
         if stdout:
             return stdout if stdout.startswith(("{", "[", "#")) else f"# {step['name']}\n\n{stdout}\n"
@@ -1128,7 +941,7 @@ def _dev_result_content(
         "execution": execution,
         "status": "prepared" if not execution.get("executed") else "executed",
     }
-    if step["id"] in {"development-self-test", "regression-testing"}:
+    if step["id"] in {"development-smoke-self-test", "qa-system-testing", "qa-regression-testing"}:
         payload["quality_gate"] = {
             "thresholds": quality_gate_config(load_config()),
             "bug_counts": {"block": 0, "critical": 0, "major": 0, "minor": 0},
@@ -1290,7 +1103,7 @@ def _lark_doc_publish_label(source_name: str, step: dict[str, Any]) -> str:
         "ui_design_spec": "UI 设计规范",
         "frontend_tech_design": "前端技术方案",
         "backend_tech_design": "服务端设计方案",
-        "test_cases": "测试用例",
+        "smoke_test_cases": "冒烟测试用例",
         "test_report": "测试报告",
         "final_delivery_report": "最终交付报告",
     }
@@ -1449,34 +1262,74 @@ def _append_lark_doc_manifest(
     write_artifact(run_id, "lark_doc_manifest", json.dumps(current, ensure_ascii=False, indent=2), category="lark-doc", created_by="workflow")
 
 
-def _host_escalation_payload(command: str) -> dict[str, Any]:
-    return {
-        "required": True,
-        "reason": "lark-cli 在当前沙箱无法读取 macOS Keychain 凭证，需要由 Codex 宿主请求沙箱外执行，继续完成自动化飞书发送。",
-        "command": command,
-        "persistent_prefix_rule": [str(PLUGIN_ROOT / "scripts" / "deliveryflow-host-lark"), "retry-prd-approval"],
-    }
-
-
-def _host_lark_retry_command(run_id: str) -> str:
-    script = PLUGIN_ROOT / "scripts" / "deliveryflow-host-lark"
-    return f"{shlex.quote(str(script))} retry-prd-approval --workspace {shlex.quote(str(Path.cwd()))} --run-id {shlex.quote(run_id)}"
-
-
 def _notify_step(run: dict[str, Any], step: dict[str, Any], phase: str, payload: dict[str, Any]) -> None:
     message = _step_notification_message(step, phase)
     emit_event(run["id"], f"workflow.step.{phase}", message, {"step_id": step["id"], "payload": payload})
-    _send_lark_text(run, message, event_key=f"{run['id']}:{step['id']}:{phase}")
+    if step["id"] == "development-doc-confirmation" and phase == "blocked":
+        docs_message = _compose_pre_development_docs_notification(run["id"])
+        _send_lark_text(run, docs_message, event_key=f"{run['id']}:{step['id']}:docs-ready")
 
 
 def _notify_gate_submitted(run: dict[str, Any], step: dict[str, Any], data: dict[str, Any]) -> None:
-    if step["id"] == "prd-approval":
-        state = "通过" if data.get("approved") else "拒绝"
-        message = f"PRD 审批已{state}，审批人：{data.get('approver', 'unknown')}"
-    else:
-        message = f"{step['name']} 已提交。"
+    state = "通过" if data.get("approved") is True else "拒绝" if data.get("approved") is False else "已提交"
+    message = f"{step['name']} 已{state}。"
     emit_event(run["id"], "workflow.gate.submitted.notification", message, {"step_id": step["id"], "gate": data})
-    _send_lark_text(run, message, event_key=f"{run['id']}:{step['id']}:submitted")
+
+
+def _compose_pre_development_docs_notification(run_id: str) -> str:
+    lines = [
+        "各 Agent 已将文档创建完成，请手动确认资料，如有不符合预期的地方可直接提出来更改，以下是文档链接：",
+        *_lark_doc_link_lines(
+            run_id,
+            [
+                ("PRD", "prd_v2"),
+                ("UI 设计规范", "ui_design_spec"),
+                ("前端技术方案", "frontend_tech_design"),
+                ("后端技术方案", "backend_tech_design"),
+                ("冒烟测试用例", "smoke_test_cases"),
+            ],
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _compose_final_delivery_notification(run_id: str, project_title: str) -> str:
+    lines = [
+        f"{project_title} 项目进度已全部完成，以下是测试报告和最终交付报告：",
+        *_lark_doc_link_lines(
+            run_id,
+            [
+                ("测试报告", "test_report"),
+                ("最终交付报告", "final_delivery_report"),
+            ],
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def _lark_doc_link_lines(run_id: str, items: list[tuple[str, str]]) -> list[str]:
+    docs = _lark_doc_manifest_documents(run_id)
+    lines: list[str] = []
+    for label, source_artifact in items:
+        doc = docs.get(source_artifact)
+        if doc and doc.get("url"):
+            lines.append(f"{label}：{doc['url']}")
+    return lines
+
+
+def _lark_doc_manifest_documents(run_id: str) -> dict[str, dict[str, Any]]:
+    try:
+        manifest = json.loads(read_artifact(run_id, "lark_doc_manifest")["content"])
+    except (WorkflowError, json.JSONDecodeError):
+        return {}
+    docs = manifest.get("documents") if isinstance(manifest, dict) else None
+    if not isinstance(docs, list):
+        return {}
+    result: dict[str, dict[str, Any]] = {}
+    for item in docs:
+        if isinstance(item, dict) and item.get("source_artifact"):
+            result[str(item["source_artifact"])] = item
+    return result
 
 
 def _step_notification_message(step: dict[str, Any], phase: str) -> str:
@@ -1487,10 +1340,16 @@ def _step_notification_message(step: dict[str, Any], phase: str) -> str:
         ("prd-validation", "completed"): "PRD v1 确定性校验已通过。",
         ("multi-role-review", "started"): "产品、前端、后端、QA 四个 Agent 开始评审 PRD v1。",
         ("multi-role-review", "completed"): "产品、前端、后端、QA 四个 Agent 已完成 PRD v1 评审。",
-        ("review-summary", "started"): "开始汇总评审意见并生成 PRD v2。",
-        ("review-summary", "completed"): "评审意见已汇总，PRD v2 已生成。",
-        ("prd-approval", "started"): "开始创建 PRD v2 飞书文档并发送审批确认卡片。",
-        ("prd-approval", "blocked"): "PRD 审批 Gate 已打开，等待飞书审批卡片事件。",
+        ("review-summary", "started"): "开始汇总评审意见并生成最终 PRD。",
+        ("review-summary", "completed"): "评审意见已汇总，最终 PRD 已生成。",
+        ("smoke-test-case-design", "started"): "开始生成冒烟测试用例。",
+        ("smoke-test-case-design", "completed"): "冒烟测试用例已生成。",
+        ("development-doc-confirmation", "blocked"): "开发前资料确认 Gate 已打开，等待用户确认是否进入开发。",
+        ("frontend-backend-integration", "started"): "开始执行：前后端联调。",
+        ("development-smoke-self-test", "started"): "开始执行：前后端开发冒烟自测。",
+        ("qa-system-testing", "started"): "开始执行：QA 系统测试。",
+        ("qa-regression-testing", "started"): "开始执行：QA 回归测试。",
+        ("qa-test-report", "started"): "开始生成 QA 测试报告。",
     }
     if (step["id"], phase) in special:
         return special[(step["id"], phase)]
@@ -1505,12 +1364,12 @@ def _step_notification_message(step: dict[str, Any], phase: str) -> str:
 
 def _send_lark_text(run: dict[str, Any], message: str, *, event_key: str) -> dict[str, Any] | None:
     config = load_config()
-    if not lark_enabled(config) or not bool(lark_config(config).get("send_step_notifications", True)):
+    if not lark_enabled(config):
         return None
     chat_id = _lark_chat_id(run)
     if not chat_id:
         return None
-    result = send_text_as_bot(chat_id, message, identity=lark_identity(config), dry_run=config_lark_dry_run(config), idempotency_key=event_key)
+    result = send_text_as_bot(chat_id, message, identity=lark_identity(config), dry_run=False, idempotency_key=event_key)
     emit_event(
         run["id"],
         "lark.notify.sent" if result.get("ok") else "lark.notify.failed",
@@ -1524,122 +1383,14 @@ def _lark_chat_id(run: dict[str, Any]) -> str | None:
     return config_lark_chat_id(load_config(), (run.get("project") or {}).get("lark_chat_id"))
 
 
-def _lark_dry_run() -> bool:
-    return config_lark_dry_run(load_config())
-
-
-def _extract_lark_action_value(payload: dict[str, Any]) -> dict[str, Any]:
-    candidates: list[Any] = [
-        payload.get("value"),
-        (payload.get("action") or {}).get("value") if isinstance(payload.get("action"), dict) else None,
-        ((payload.get("event") or {}).get("action") or {}).get("value") if isinstance(payload.get("event"), dict) and isinstance((payload.get("event") or {}).get("action"), dict) else None,
-        ((payload.get("event") or {}).get("operator") or {}).get("value") if isinstance(payload.get("event"), dict) and isinstance((payload.get("event") or {}).get("operator"), dict) else None,
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, str):
-            try:
-                candidate = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-        if isinstance(candidate, dict) and "action" in candidate:
-            return candidate
-    if "action" in payload:
-        return payload
-    raise WorkflowError("cannot find lark card action value")
-
-
-def _extract_lark_approval_reason(payload: dict[str, Any], value: dict[str, Any]) -> str:
-    form_values: list[Any] = [
-        value.get("form_value"),
-        payload.get("form_value"),
-        (payload.get("action") or {}).get("form_value") if isinstance(payload.get("action"), dict) else None,
-        ((payload.get("event") or {}).get("action") or {}).get("form_value") if isinstance(payload.get("event"), dict) and isinstance((payload.get("event") or {}).get("action"), dict) else None,
-    ]
-    for form_value in form_values:
-        if isinstance(form_value, str):
-            try:
-                form_value = json.loads(form_value)
-            except json.JSONDecodeError:
-                form_value = {}
-        if isinstance(form_value, dict):
-            reason = form_value.get("reject_reason") or form_value.get("reason") or form_value.get("comment")
-            if isinstance(reason, str) and reason.strip():
-                return reason.strip()
-    direct = value.get("reject_reason") or value.get("reason") or value.get("comment")
-    return direct.strip() if isinstance(direct, str) else ""
-
-
-def _validate_lark_approval_card_current(run_id: str, value: dict[str, Any]) -> None:
-    submitted_doc_url = value.get("doc_url")
-    if not isinstance(submitted_doc_url, str) or not submitted_doc_url:
-        return
-    try:
-        latest_doc = json.loads(read_artifact(run_id, "prd_v2_lark_doc")["content"])
-    except (WorkflowError, json.JSONDecodeError):
-        return
-    latest_doc_url = latest_doc.get("url")
-    if isinstance(latest_doc_url, str) and latest_doc_url and submitted_doc_url != latest_doc_url:
-        raise WorkflowError("stale PRD approval card: document URL is not the latest PRD v2 document")
-
-
-def _approval_card_idempotency_key(run_id: str, prd_version: int, doc_version: int) -> str:
-    run_suffix = run_id.rsplit("_", 1)[-1] or run_id[-8:]
-    return f"pa-{run_suffix[:12]}-p{prd_version}-d{doc_version}"
-
-
 def _latest_prd_rejection_reason(run_id: str) -> str:
     try:
-        gate = json.loads(read_artifact(run_id, "prd-approval_gate")["content"])
+        gate = json.loads(read_artifact(run_id, "development-doc-confirmation_gate")["content"])
     except (WorkflowError, json.JSONDecodeError):
         return ""
     if gate.get("approved") is False:
         return str(gate.get("comment") or gate.get("reason") or "").strip()
     return ""
-
-
-def _latest_prd_approval_round(run_id: str) -> int:
-    try:
-        return int(read_artifact(run_id, "prd_v2_lark_doc")["version"])
-    except (WorkflowError, TypeError, ValueError):
-        try:
-            return int(read_artifact(run_id, "prd_v2")["version"])
-        except (WorkflowError, TypeError, ValueError):
-            return 1
-
-
-@contextmanager
-def _temporary_lark_workspace(value: dict[str, Any]):
-    workspace = value.get("workspace")
-    if not isinstance(workspace, str) or not workspace:
-        yield
-        return
-    path = Path(workspace).expanduser()
-    if not path.is_absolute() or not path.exists() or not path.is_dir():
-        raise WorkflowError(f"invalid lark card workspace: {workspace}")
-    old_cwd = Path.cwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(old_cwd)
-
-
-def _extract_lark_operator(payload: dict[str, Any]) -> str:
-    candidates = [
-        payload.get("operator"),
-        payload.get("user"),
-        (payload.get("event") or {}).get("operator") if isinstance(payload.get("event"), dict) else None,
-        (payload.get("event") or {}).get("user") if isinstance(payload.get("event"), dict) else None,
-    ]
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate:
-            return candidate
-        if isinstance(candidate, dict):
-            for key in ("open_id", "user_id", "union_id", "name"):
-                value = candidate.get(key)
-                if isinstance(value, str) and value:
-                    return value
-    return "lark-card-user"
 
 
 def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, Any]) -> str:
@@ -1708,7 +1459,7 @@ def _ensure_agent_execution_completed(execution: dict[str, Any], step_id: str) -
 
 
 def _ensure_dev_execution_verified(execution: dict[str, Any], step_id: str) -> None:
-    if step_id not in {"frontend-development", "backend-development", "development-self-test", "regression-testing", "bug-fix"}:
+    if step_id not in {"frontend-development", "backend-development", "frontend-backend-integration", "development-smoke-self-test", "qa-system-testing", "qa-regression-testing", "bug-fix"}:
         return
     if not execution.get("executed"):
         return
@@ -1788,7 +1539,8 @@ def _agent_output_file_candidates(step: dict[str, Any], artifact_name: str) -> l
             artifact_root() / "dev_task_breakdown.md",
             artifact_root() / "delivery-manager" / "dev" / "v1" / "dev-tasks.md",
         ],
-        "test_cases": [
+        "smoke_test_cases": [
+            artifact_root() / "smoke_test_cases.md",
             artifact_root() / "test_cases.md",
             artifact_root() / "qa-engineer" / "test" / "v1" / "test-cases.md",
         ],
@@ -1824,7 +1576,7 @@ def _validate_gate(schema: dict[str, Any], data: dict[str, Any]) -> list[str]:
     return errors
 
 
-def _next_step(step: dict[str, Any], result: dict[str, Any]) -> str | None:
+def _next_step(run_id: str, step: dict[str, Any], result: dict[str, Any]) -> str | None:
     transitions = step.get("next", {})
     if not transitions:
         return None
@@ -1834,7 +1586,23 @@ def _next_step(step: dict[str, Any], result: dict[str, Any]) -> str | None:
         return transitions["rejected"]
     if result.get("can_proceed") is False and "failed" in transitions:
         return transitions["failed"]
-    return transitions.get("default")
+    next_step = transitions.get("default")
+    if not _project_requires_backend(run_id):
+        if step["id"] == "frontend-tech-design":
+            return "smoke-test-case-design"
+        if step["id"] == "publish-frontend-tech-doc":
+            return "publish-smoke-test-cases-doc"
+        if step["id"] == "frontend-development":
+            return "frontend-backend-integration"
+    return next_step
+
+
+def _project_requires_backend(run_id: str) -> bool:
+    try:
+        data = json.loads(read_artifact(run_id, "requirement-intake_gate")["content"])
+    except (WorkflowError, json.JSONDecodeError):
+        return True
+    return bool(data.get("requires_backend", True))
 
 
 def _move_to_next(run_id: str, next_step: str | None) -> None:

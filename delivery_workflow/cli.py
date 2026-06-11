@@ -7,7 +7,6 @@ from typing import Any
 
 from .capabilities import doctor, install_lark_cli
 from .config import config_sources, initialize_project_workspace, load_config
-from .lark_events import run_lark_long_connection_consumer
 from .lark import run_project_lark_cli
 from .engine import (
     WorkflowError,
@@ -20,7 +19,6 @@ from .engine import (
     list_jobs,
     read_artifact,
     request_bug_fix,
-    retry_prd_approval_lark,
     run_worker_once,
     run_worker_until_blocked,
     status,
@@ -74,6 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     create_p.add_argument("--requirement", required=True)
     create_p.add_argument("--title")
     create_p.add_argument("--owner-id")
+    create_p.add_argument("--lark-chat-id", help="项目群 chat_id，仅用于当前项目的飞书消息通知，不写入默认配置。")
     create_p.add_argument("--business-goal")
     create_p.add_argument("--requires-frontend", dest="requires_frontend", action="store_true", default=True)
     create_p.add_argument("--no-requires-frontend", dest="requires_frontend", action="store_false")
@@ -120,9 +119,6 @@ def main(argv: list[str] | None = None) -> int:
 
     lark = sub.add_parser("lark")
     lark_sub = lark.add_subparsers(dest="lark_command")
-    lark_sub.add_parser("event-consumer")
-    retry_prd = lark_sub.add_parser("retry-prd-approval")
-    retry_prd.add_argument("--run-id", required=True)
     lark_cli = lark_sub.add_parser("cli")
     lark_cli.add_argument("args", nargs=argparse.REMAINDER)
 
@@ -186,6 +182,7 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                         requirement=args.requirement,
                         title=args.title,
                         owner_id=args.owner_id,
+                        lark_chat_id=args.lark_chat_id,
                         business_goal=args.business_goal,
                         requires_frontend=args.requires_frontend,
                         requires_backend=args.requires_backend,
@@ -242,12 +239,6 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
                 time.sleep(max(args.interval, 1.0))
             return 0
     if args.command == "lark":
-        if args.lark_command == "event-consumer":
-            run_lark_long_connection_consumer()
-            return 0
-        if args.lark_command == "retry-prd-approval":
-            print_json(retry_prd_approval_lark(args.run_id))
-            return 0
         if args.lark_command == "cli":
             cli_args = list(args.args or [])
             if cli_args and cli_args[0] == "--":

@@ -43,23 +43,6 @@
     "lark": {
         "enabled": true,
         "identity": "bot",
-        "dry_run": false,
-        "send_step_notifications": true,
-        "send_prd_approval_card": true,
-        "create_prd_doc_without_chat": true,
-        "prd_doc_title_template": "{project_title}PRD",
-        "sender": {
-            "mode": "current_process",
-            "on_keychain_error": "host_escalation"
-        },
-        "sdk": {
-            "credential_source": "lark-cli",
-            "profile": "",
-            "log_level": "info"
-        },
-        "event": {
-            "transport": "sdk_websocket",
-            "auto_start_consumer": true
-        }
+        "chat_id": ""
     }
 }

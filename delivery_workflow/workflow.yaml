@@ -1,7 +1,7 @@
 {
   "id": "delivery-workflow",
   "name": "通用软件交付流程",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "steps": [
     {
       "id": "requirement-intake",
@@ -56,32 +56,15 @@
     },
     {
       "id": "review-summary",
-      "name": "评审意见汇总与 PRD v2",
+      "name": "评审意见汇总与最终 PRD",
       "category": "automated",
       "executor": "agent",
       "agent": "product_manager",
       "artifact_category": "prd",
       "ref": "references/04-review-summary.md",
-      "inputs": ["prd_v1", "requirement_review_report", "prd-approval_gate"],
+      "inputs": ["prd_v1", "requirement_review_report", "development-doc-confirmation_gate"],
       "outputs": ["prd_v2"],
-      "next": {"default": "prd-approval"}
-    },
-    {
-      "id": "prd-approval",
-      "name": "PRD 审批 Gate",
-      "category": "interactive",
-      "executor": "gate",
-      "ref": "references/05-prd-approval.md",
-      "gate": {
-        "kind": "approval",
-        "schema": {
-          "approved": {"type": "boolean", "required": true},
-          "approver": {"type": "string", "required": true},
-          "comment": {"type": "string", "required": false}
-        },
-        "actions": ["approve", "reject"]
-      },
-      "next": {"approved": "ui-design-spec", "rejected": "review-summary"}
+      "next": {"default": "ui-design-spec"}
     },
     {
       "id": "ui-design-spec",
@@ -93,16 +76,6 @@
       "ref": "references/06-ui-design-spec.md",
       "inputs": ["prd_v2"],
       "outputs": ["ui_design_spec"],
-      "next": {"default": "publish-ui-design-spec-doc"}
-    },
-    {
-      "id": "publish-ui-design-spec-doc",
-      "name": "发布飞书 UI 设计规范文档",
-      "category": "automated",
-      "executor": "lark-doc",
-      "source_artifact": "ui_design_spec",
-      "output_artifact": "ui_design_spec_lark_doc",
-      "title_template": "{project_title} 项目 UI 设计规范",
       "next": {"default": "frontend-tech-design"}
     },
     {
@@ -127,18 +100,38 @@
       "ref": "references/09-backend-tech-design.md",
       "inputs": ["prd_v2"],
       "outputs": ["backend_tech_design"],
-      "next": {"default": "tech-review"}
+      "next": {"default": "smoke-test-case-design"}
     },
     {
-      "id": "tech-review",
-      "name": "技术方案评审",
+      "id": "smoke-test-case-design",
+      "name": "QA 生成冒烟测试用例",
       "category": "automated",
       "executor": "agent",
-      "agent": "tech_review_board",
-      "artifact_category": "tech",
-      "ref": "references/10-tech-review.md",
-      "inputs": ["frontend_tech_design", "backend_tech_design"],
-      "outputs": ["tech_review_report"],
+      "agent": "qa_engineer",
+      "artifact_category": "test",
+      "ref": "references/15-smoke-test-case-design.md",
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design"],
+      "outputs": ["smoke_test_cases"],
+      "next": {"default": "publish-prd-doc"}
+    },
+    {
+      "id": "publish-prd-doc",
+      "name": "发布飞书 PRD 文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "prd_v2",
+      "output_artifact": "prd_lark_doc",
+      "title_template": "{project_title} PRD",
+      "next": {"default": "publish-ui-design-spec-doc"}
+    },
+    {
+      "id": "publish-ui-design-spec-doc",
+      "name": "发布飞书 UI 设计规范文档",
+      "category": "automated",
+      "executor": "lark-doc",
+      "source_artifact": "ui_design_spec",
+      "output_artifact": "ui_design_spec_lark_doc",
+      "title_template": "{project_title} UI 设计规范",
       "next": {"default": "publish-frontend-tech-doc"}
     },
     {
@@ -148,42 +141,45 @@
       "executor": "lark-doc",
       "source_artifact": "frontend_tech_design",
       "output_artifact": "frontend_tech_design_lark_doc",
-      "title_template": "{project_title} 项目前端技术方案",
-      "include_artifacts": ["tech_review_report"],
+      "title_template": "{project_title} 前端技术方案",
       "next": {"default": "publish-backend-tech-doc"}
     },
     {
       "id": "publish-backend-tech-doc",
-      "name": "发布飞书服务端设计方案文档",
+      "name": "发布飞书后端技术方案文档",
       "category": "automated",
       "executor": "lark-doc",
       "source_artifact": "backend_tech_design",
       "output_artifact": "backend_tech_design_lark_doc",
-      "title_template": "{project_title} 项目服务端设计方案",
-      "include_artifacts": ["tech_review_report"],
-      "next": {"default": "dev-task-breakdown"}
+      "title_template": "{project_title} 后端技术方案",
+      "next": {"default": "publish-smoke-test-cases-doc"}
     },
     {
-      "id": "dev-task-breakdown",
-      "name": "开发任务拆解",
+      "id": "publish-smoke-test-cases-doc",
+      "name": "发布飞书冒烟测试用例文档",
       "category": "automated",
-      "executor": "agent",
-      "agent": "delivery_manager",
-      "artifact_category": "dev",
-      "ref": "references/11-dev-task-breakdown.md",
-      "inputs": ["prd_v2", "frontend_tech_design", "backend_tech_design", "tech_review_report"],
-      "outputs": ["dev_tasks"],
-      "next": {"default": "development-prepare"}
+      "executor": "lark-doc",
+      "source_artifact": "smoke_test_cases",
+      "output_artifact": "smoke_test_cases_lark_doc",
+      "title_template": "{project_title} 冒烟测试用例",
+      "next": {"default": "development-doc-confirmation"}
     },
     {
-      "id": "development-prepare",
-      "name": "开发前确定性准备",
-      "category": "automated",
-      "executor": "dev-runner",
-      "ref": "references/12-development-prepare.md",
-      "inputs": ["dev_tasks"],
-      "outputs": ["development_prepare_result"],
-      "next": {"default": "frontend-development"}
+      "id": "development-doc-confirmation",
+      "name": "开发前资料确认 Gate",
+      "category": "interactive",
+      "executor": "gate",
+      "ref": "references/07-development-doc-confirmation.md",
+      "gate": {
+        "kind": "approval",
+        "schema": {
+          "approved": {"type": "boolean", "required": true},
+          "approver": {"type": "string", "required": true},
+          "comment": {"type": "string", "required": false}
+        },
+        "actions": ["approve", "reject"]
+      },
+      "next": {"approved": "frontend-development", "rejected": "review-summary"}
     },
     {
       "id": "frontend-development",
@@ -191,7 +187,7 @@
       "category": "automated",
       "executor": "dev-runner",
       "ref": "references/13-frontend-development.md",
-      "inputs": ["prd_v2", "dev_tasks", "frontend_tech_design", "ui_design_spec"],
+      "inputs": ["prd_v2", "smoke_test_cases", "frontend_tech_design", "ui_design_spec"],
       "outputs": ["frontend_dev_result"],
       "next": {"default": "backend-development"}
     },
@@ -201,51 +197,71 @@
       "category": "automated",
       "executor": "dev-runner",
       "ref": "references/14-backend-development.md",
-      "inputs": ["dev_tasks", "backend_tech_design"],
+      "inputs": ["prd_v2", "smoke_test_cases", "backend_tech_design"],
       "outputs": ["backend_dev_result"],
-      "next": {"default": "development-self-test"}
+      "next": {"default": "frontend-backend-integration"}
     },
     {
-      "id": "development-self-test",
-      "name": "开发自测",
+      "id": "frontend-backend-integration",
+      "name": "前后端联调",
       "category": "automated",
       "executor": "dev-runner",
-      "ref": "references/15-development-self-test.md",
-      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "dev_tasks", "frontend_dev_result", "backend_dev_result"],
-      "outputs": ["development_self_test_report"],
-      "next": {"default": "test-case-design"}
+      "ref": "references/15-frontend-backend-integration.md",
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result"],
+      "outputs": ["integration_test_result"],
+      "next": {"default": "development-smoke-self-test"}
     },
     {
-      "id": "test-case-design",
-      "name": "测试用例设计",
+      "id": "development-smoke-self-test",
+      "name": "前后端开发冒烟自测",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/16-development-smoke-self-test.md",
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "smoke_test_cases", "frontend_dev_result", "backend_dev_result", "integration_test_result"],
+      "outputs": ["development_smoke_self_test_report"],
+      "next": {"default": "qa-system-testing"}
+    },
+    {
+      "id": "qa-system-testing",
+      "name": "QA 系统测试",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/17-qa-system-testing.md",
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "smoke_test_cases", "development_smoke_self_test_report", "frontend_dev_result", "backend_dev_result", "integration_test_result"],
+      "outputs": ["qa_system_test_result"],
+      "next": {"default": "qa-test-report", "failed": "bug-fix"}
+    },
+    {
+      "id": "bug-fix",
+      "name": "修复 Bug",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/17-bug-fix.md",
+      "inputs": ["manual_bug_fix_request", "prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "smoke_test_cases", "development_smoke_self_test_report", "qa_system_test_result", "qa_regression_test_result", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
+      "outputs": ["bug_fix_result"],
+      "next": {"default": "qa-regression-testing"}
+    },
+    {
+      "id": "qa-regression-testing",
+      "name": "QA 回归测试",
+      "category": "automated",
+      "executor": "dev-runner",
+      "ref": "references/19-qa-regression-testing.md",
+      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "smoke_test_cases", "development_smoke_self_test_report", "qa_system_test_result", "bug_fix_result", "frontend_dev_result", "backend_dev_result"],
+      "outputs": ["qa_regression_test_result"],
+      "next": {"default": "qa-test-report", "failed": "bug-fix"}
+    },
+    {
+      "id": "qa-test-report",
+      "name": "QA 生成测试报告",
       "category": "automated",
       "executor": "agent",
       "agent": "qa_engineer",
       "artifact_category": "test",
-      "ref": "references/15-test-case-design.md",
-      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "development_self_test_report"],
-      "outputs": ["test_cases"],
-      "next": {"default": "publish-test-cases-doc"}
-    },
-    {
-      "id": "publish-test-cases-doc",
-      "name": "发布飞书测试用例文档",
-      "category": "automated",
-      "executor": "lark-doc",
-      "source_artifact": "test_cases",
-      "output_artifact": "test_cases_lark_doc",
-      "title_template": "{project_title} 项目测试用例",
-      "next": {"default": "regression-testing"}
-    },
-    {
-      "id": "regression-testing",
-      "name": "回归测试执行",
-      "category": "automated",
-      "executor": "dev-runner",
-      "ref": "references/16-regression-testing.md",
-      "inputs": ["prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "development_self_test_report", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
+      "ref": "references/20-qa-test-report.md",
+      "inputs": ["prd_v2", "smoke_test_cases", "development_smoke_self_test_report", "qa_system_test_result", "qa_regression_test_result", "bug_fix_result"],
       "outputs": ["test_report"],
-      "next": {"default": "publish-test-report-doc", "failed": "bug-fix"}
+      "next": {"default": "publish-test-report-doc"}
     },
     {
       "id": "publish-test-report-doc",
@@ -254,18 +270,8 @@
       "executor": "lark-doc",
       "source_artifact": "test_report",
       "output_artifact": "test_report_lark_doc",
-      "title_template": "{project_title} 项目测试报告",
+      "title_template": "{project_title} 测试报告",
       "next": {"default": "final-report"}
-    },
-    {
-      "id": "bug-fix",
-      "name": "修复 Bug",
-      "category": "automated",
-      "executor": "dev-runner",
-      "ref": "references/17-bug-fix.md",
-      "inputs": ["manual_bug_fix_request", "prd_v2", "ui_design_spec", "frontend_tech_design", "backend_tech_design", "test_cases", "development_self_test_report", "test_report", "frontend_dev_result", "backend_dev_result", "bug_fix_result"],
-      "outputs": ["bug_fix_result"],
-      "next": {"default": "regression-testing"}
     },
     {
       "id": "final-report",
@@ -274,8 +280,8 @@
       "executor": "agent",
       "agent": "delivery_manager",
       "artifact_category": "release",
-      "ref": "references/18-final-report.md",
-      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "development_self_test_report", "test_report", "bug_fix_result"],
+      "ref": "references/21-final-report.md",
+      "inputs": ["prd_v2", "frontend_dev_result", "backend_dev_result", "integration_test_result", "development_smoke_self_test_report", "test_report", "bug_fix_result"],
       "outputs": ["final_delivery_report"],
       "next": {"default": "publish-final-report-doc"}
     },
@@ -285,6 +291,8 @@
       "category": "automated",
       "executor": "lark-doc",
       "source_artifact": "final_delivery_report",
+      "output_artifact": "final_report_lark_doc",
+      "title_template": "{project_title} 最终交付报告",
       "next": {"default": "delivery-notification"}
     },
     {
@@ -292,7 +300,7 @@
       "name": "交付完成通知",
       "category": "notification",
       "executor": "notify",
-      "message": "软件交付 workflow 已完成，已推进到上线并发布最终报告。",
+      "message": "软件交付 workflow 已完成，已发布最终交付报告。",
       "next": {}
     }
   ]

@@ -6,9 +6,8 @@ from typing import Any
 
 from . import __version__
 from .capabilities import doctor
-from .config import initialize_project_workspace, lark_dry_run, lark_enabled, load_config
+from .config import initialize_project_workspace, load_config
 from .engine import (
-    WorkflowError,
     create_project,
     current_project_status,
     delete_current_project,
@@ -17,7 +16,6 @@ from .engine import (
     list_artifacts,
     read_artifact,
     request_bug_fix,
-    retry_prd_approval_lark,
     run_worker_once,
     run_worker_until_blocked,
     status,
@@ -29,13 +27,14 @@ from .engine import (
 TOOLS = [
     {
         "name": "delivery_create_project",
-        "description": "Create a delivery project and workflow run. If a real Feishu/Lark approval card is sent and the run blocks at approval, this tool automatically waits until the approval callback and subsequent worker jobs settle; do not ask the user whether to watch. When code_platforms.enable_agent_cli=false, agents must not implement generated development tasks themselves.",
+        "description": "Create a delivery project and workflow run. The worker runs through document preparation, publishes project documents to Feishu/Lark when enabled, then stops at the development-doc-confirmation gate before development. When code_platforms.enable_agent_cli=false, agents must not implement generated development tasks themselves.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "requirement": {"type": "string"},
                 "title": {"type": "string"},
                 "business_goal": {"type": "string"},
+                "lark_chat_id": {"type": "string"},
                 "requires_frontend": {"type": "boolean"},
                 "requires_backend": {"type": "boolean"},
             },
@@ -77,7 +76,7 @@ TOOLS = [
     },
     {
         "name": "delivery_submit_gate",
-        "description": "Submit structured gate data for non-approval interactive steps. PRD/release approval gates are only submitted by Lark card callbacks or an explicit operator CLI action, never by the AI agent deciding in MCP.",
+        "description": "Submit structured gate data for interactive steps. Use development-doc-confirmation only when the human user explicitly confirms whether documents are ready for development.",
         "inputSchema": {
             "type": "object",
             "properties": {"run_id": {"type": "string"}, "step_id": {"type": "string"}, "data": {"type": "object"}},
@@ -108,7 +107,7 @@ TOOLS = [
     },
     {
         "name": "delivery_watch_run",
-        "description": "Wait in the foreground until a workflow run receives a gate/Lark callback event and settles with no pending/running jobs, or reaches a new stable step. Use this after creating a project blocked on Feishu/Lark approval; do not ask the user whether to continue pending workflow jobs.",
+        "description": "Wait in the foreground until a workflow run receives a gate submission and settles with no pending/running jobs, or reaches a new stable step.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -130,11 +129,6 @@ TOOLS = [
             },
             "required": ["issue"],
         },
-    },
-    {
-        "name": "delivery_retry_prd_approval_lark",
-        "description": "Retry PRD v2 Lark document creation and approval card sending for an existing run.",
-        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]},
     },
     {
         "name": "delivery_list_artifacts",
@@ -194,6 +188,7 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
             requirement=args["requirement"],
             title=args.get("title"),
             business_goal=args.get("business_goal"),
+            lark_chat_id=args.get("lark_chat_id"),
             requires_frontend=args.get("requires_frontend", True),
             requires_backend=args.get("requires_backend", True),
         )
@@ -231,8 +226,6 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
             reporter=args.get("reporter"),
             source="mcp",
         )
-    if name == "delivery_retry_prd_approval_lark":
-        return retry_prd_approval_lark(args["run_id"])
     if name == "delivery_list_artifacts":
         return list_artifacts(args["run_id"])
     if name == "delivery_read_artifact":
@@ -252,16 +245,7 @@ def _maybe_auto_watch_created_project(created: dict[str, Any]) -> dict[str, Any]
     if not isinstance(run_id, str) or not run_id:
         return _created_project_response(created, {"ok": True, "skipped": True, "reason": "missing run_id"}, None)
     current = status(run_id)
-    current_step = current["run"].get("current_step")
-    if current_step != "prd-approval":
-        return _created_project_response(created, {"ok": True, "skipped": True, "reason": "run is not blocked at an approval gate", "current_step": current_step}, current)
-    if not any(gate.get("step_id") == current_step and gate.get("status") == "open" for gate in current.get("gates", [])):
-        return _created_project_response(created, {"ok": True, "skipped": True, "reason": "approval gate is not open", "current_step": current_step}, current)
-    if not _real_lark_approval_card_was_sent(created):
-        return _created_project_response(created, {"ok": True, "skipped": True, "reason": "no real Feishu/Lark approval card was sent", "current_step": current_step}, current)
-    watch = watch_run(run_id)
-    latest_status = watch.get("status") if isinstance(watch.get("status"), dict) else status(run_id)
-    return _created_project_response(created, watch, latest_status)
+    return _created_project_response(created, {"ok": True, "skipped": True, "reason": "workflow stops at human document confirmation", "current_step": current["run"].get("current_step")}, current)
 
 
 def _status_for_created_project(created: dict[str, Any]) -> dict[str, Any] | None:
@@ -308,27 +292,8 @@ def _mcp_auto_watch_enabled() -> bool:
     return bool(workflow.get("mcp_auto_watch_after_create", True))
 
 
-def _real_lark_approval_card_was_sent(created: dict[str, Any]) -> bool:
-    config = load_config()
-    if not lark_enabled(config) or lark_dry_run(config):
-        return False
-    auto_run = created.get("auto_run") if isinstance(created.get("auto_run"), dict) else {}
-    results = auto_run.get("results") if isinstance(auto_run.get("results"), list) else []
-    for item in reversed(results):
-        result = item.get("result") if isinstance(item, dict) else {}
-        gate = result.get("gate") if isinstance(result, dict) else {}
-        lark = gate.get("lark") if isinstance(gate, dict) else {}
-        card_result = lark.get("card_result") if isinstance(lark, dict) else {}
-        if isinstance(card_result, dict) and card_result.get("ok"):
-            return True
-    return False
-
-
 def _guard_mcp_gate_submission(step_id: str) -> None:
-    if step_id == "prd-approval":
-        raise WorkflowError(
-            f"{step_id} must wait for the Feishu/Lark approval card callback, or be submitted by an explicit human CLI action; MCP agents are not allowed to approve or reject on behalf of the operator."
-        )
+    return None
 
 
 def _read_message() -> dict[str, Any] | None:
