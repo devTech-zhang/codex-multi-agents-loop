@@ -328,6 +328,32 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
 
         self.assertEqual(second["next_step"], "qa-test-report")
 
+    def test_prepared_only_qa_generates_report_and_continues(self) -> None:
+        created = create_project(requirement="做 TODO H5", title="TODO H5", auto_start=False)
+        run_id = created["run_id"]
+        for name in (
+            "prd_v2",
+            "ui_design_spec",
+            "frontend_tech_design",
+            "backend_tech_design",
+            "smoke_test_cases",
+            "development_smoke_self_test_report",
+            "frontend_dev_result",
+            "backend_dev_result",
+            "integration_test_result",
+        ):
+            write_artifact(run_id, name, f"# {name}\n\n内容", category="test", created_by="test")
+
+        result = execute_step(run_id, "qa-system-testing")
+
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["next_step"], "qa-test-report")
+        self.assertFalse(result["result"]["execution"]["executed"])
+        self.assertTrue(result["result"]["quality_gate"]["passed"])
+        report = json.loads(read_artifact(run_id, "qa_system_test_result")["content"])
+        self.assertEqual(report["status"], "prepared")
+        self.assertEqual(report["quality_gate"]["bug_counts"], {"block": 0, "critical": 0, "major": 0, "minor": 0})
+
     def test_watch_run_settles_after_document_confirmation_gate_submission(self) -> None:
         created = create_project(requirement="新增客户退款审批能力", title="客户退款审批")
         run_id = created["run_id"]

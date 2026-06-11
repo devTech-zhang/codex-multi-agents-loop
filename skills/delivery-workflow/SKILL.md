@@ -76,7 +76,7 @@ PRD v1
 -> final delivery report
 ```
 
-开发和 QA 必须真实执行命令。若输出显示“等待批准”“暂未运行测试”“只生成任务包”，步骤必须视为阻断或失败，不能发布伪完成产物。
+`enable_agent_cli=true` 时，开发和 QA 必须真实执行命令；若输出显示“等待批准”“暂未运行测试”等未执行信号，步骤必须视为阻断或失败。`enable_agent_cli=false` 是 prepared-only 演示/任务包模式，Workflow 可生成结构化占位产物并继续推进全链路，但这些产物只能标记为 prepared，不能对外声称已真实开发或真实测试。
 
 ## Feishu/Lark Notes
 
@@ -123,7 +123,7 @@ workflow.config.json
 ## Common Mistakes
 
 - 看到 `development-doc-confirmation` 就直接继续：必须先让用户确认文档是否可进入开发。
-- 把 `enable_agent_cli=false` 的任务包当成已开发完成：禁止。
+- 把 `enable_agent_cli=false` 的任务包/占位测试报告当成已真实开发、真实测试完成：禁止。
 - 未检查 QA `quality_gate` 就进入最终报告：必须由 workflow 根据 bug 等级和数量决定。
 - 从插件源码目录启动业务项目流程：业务项目必须在自己的项目目录初始化和运行。
 - hooks 只做 evidence 与安全拦截，不负责自动推进 worker。
