@@ -27,11 +27,10 @@ def create_doc_as_bot(
         identity,
         "--api-version",
         "v2",
+        "--title",
+        title,
     ]
-    if doc_format == "markdown":
-        command.extend(["--doc-format", "markdown", "--content", f"# {title}\n\n{content}"])
-    else:
-        command.extend(["--doc-format", doc_format, "--content", content])
+    command.extend(["--markdown", content])
     return _run_json(command, timeout=120, dry_run=dry_run)
 
 

@@ -244,13 +244,17 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
             execute_step(created["run_id"], "prd-v1")
 
         self.assertIn("permission approval", str(context.exception))
+        current = status(created["run_id"])
+        self.assertEqual(current["run"]["status"], "failed")
+        step_run = next(item for item in current["step_runs"] if item["step_id"] == "prd-v1")
+        self.assertEqual(step_run["status"], "failed")
 
     def test_ui_design_spec_prefers_written_design_md_over_stdout_summary(self) -> None:
         self.write_config({"code_platforms": {"enable_agent_cli": True}})
         created = create_project(requirement="做 TODO H5", title="TODO H5", auto_start=False)
         run_id = created["run_id"]
         write_artifact(run_id, "prd_v2", "# PRD v2\n\n完整需求", category="prd", created_by="test")
-        Path("delivery-project/DESIGN.md").write_text("# DESIGN.md\n\n详尽设计规范正文", encoding="utf-8")
+        Path("delivery-project/ui_design_spec.md").write_text("# DESIGN.md\n\n详尽设计规范正文", encoding="utf-8")
 
         with patch(
             "delivery_workflow.engine.maybe_run_command",
@@ -261,6 +265,24 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         content = read_artifact(run_id, "ui_design_spec")["content"]
         self.assertIn("详尽设计规范正文", content)
         self.assertNotIn("只是一段摘要", content)
+
+    def test_prd_v2_prefers_written_full_file_over_stdout_summary(self) -> None:
+        self.write_config({"code_platforms": {"enable_agent_cli": True}})
+        created = create_project(requirement="做 TODO H5", title="TODO H5", auto_start=False)
+        run_id = created["run_id"]
+        write_artifact(run_id, "prd_v1", "# PRD v1\n\n初始需求", category="prd", created_by="test")
+        write_artifact(run_id, "requirement_review_report", "# 评审\n\n补充验收标准", category="review", created_by="test")
+        Path("delivery-project/prd_v2.md").write_text("# PRD v2\n\n最终完整 PRD 正文", encoding="utf-8")
+
+        with patch(
+            "delivery_workflow.engine.maybe_run_command",
+            return_value={"executed": True, "returncode": 0, "stdout": "# Summary\n\n只是一段 PRD 摘要", "stderr": "", "command": ["claude", "-p"]},
+        ):
+            execute_step(run_id, "review-summary")
+
+        content = read_artifact(run_id, "prd_v2")["content"]
+        self.assertIn("最终完整 PRD 正文", content)
+        self.assertNotIn("只是一段 PRD 摘要", content)
 
     def test_gate_and_worker_progress_to_prd_approval(self) -> None:
         created = create_project(requirement="新增后台 order approval 功能", title="order approval")
@@ -296,14 +318,11 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         for heading in ("版本变化表格", "各 Agent 评审意见汇总", "相比 v1 变更点", "未采纳意见", "最终完整 PRD 内容"):
             self.assertIn(heading, prd_doc_markdown)
         self.assertIn("| 版本 | 来源 | 主要变化 |\n| --- | --- | --- |\n| v1", prd_doc_markdown)
-        prd_doc_xml = read_artifact(run_id, "prd_v2_lark_xml")["content"]
-        self.assertIn("<title>客户退款审批PRD</title>", prd_doc_xml)
-        self.assertIn("<table>", prd_doc_xml)
-        self.assertIn("<th background-color=\"light-gray\">版本</th>", prd_doc_xml)
-        self.assertIn("<h1>各 Agent 评审意见汇总</h1>", prd_doc_xml)
         command_text = "\n".join(prd_doc["result"]["command"])
-        self.assertIn("<title>客户退款审批PRD</title>", command_text)
-        self.assertNotIn("--doc-format\nmarkdown", command_text)
+        self.assertIn("--title\n客户退款审批PRD", command_text)
+        self.assertIn("--markdown", command_text)
+        self.assertNotIn("--doc-format", command_text)
+        self.assertNotIn("<doc>", command_text)
 
         card = json.loads(read_artifact(run_id, "prd_approval_card_message")["content"])
         command = card["result"]["command"]
@@ -592,10 +611,11 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         final_doc = json.loads(read_artifact(run_id, "final_report_lark_doc")["content"])
         command = final_doc["command"]
         command_text = "\n".join(command)
-        self.assertIn("<title>客户退款审批最终交付报告</title>", command_text)
-        self.assertIn("--doc-format\nxml", command_text)
-        final_doc_xml = read_artifact(run_id, "final_report_lark_doc_xml")["content"]
-        self.assertIn("<title>客户退款审批最终交付报告</title>", final_doc_xml)
+        self.assertIn("--title\n客户退款审批最终交付报告", command_text)
+        self.assertIn("--markdown", command_text)
+        self.assertNotIn("--doc-format", command_text)
+        final_doc_markdown = read_artifact(run_id, "final_report_lark_doc_markdown")["content"]
+        self.assertIn("最终交付报告", final_doc_markdown)
         with connect() as conn:
             notice = conn.execute(
                 "SELECT * FROM events WHERE run_id = ? AND event_type = 'lark.notify.sent' AND message LIKE ?",

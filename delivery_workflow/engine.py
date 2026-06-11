@@ -409,6 +409,10 @@ def execute_step(run_id: str, step_id: str, payload: dict[str, Any] | None = Non
         log_workflow("step.completed", f"步骤执行完成：{step['name']}。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload=completed)
         return completed
     except Exception as exc:
+        failure = {"error": str(exc)}
+        _mark_step(run_id, step, "failed", failure)
+        _mark_run_failed(run_id)
+        _notify_step(run, step, "failed", failure)
         log_workflow("step.failed", f"步骤执行失败：{step['name']}。", run_id=run_id, project_id=run["project_id"], step_id=step_id, payload={"error": str(exc)}, level="error")
         raise
 
@@ -852,8 +856,7 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
     title_template = str(step.get("title_template") or lark_config(config).get("final_report_doc_title_template") or default_title)
     title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
     publish_content = _compose_generic_lark_doc_source(run_id, source_name, source["content"], step)
-    doc_xml = _compose_lark_doc_xml(title, publish_content)
-    result = create_doc_as_bot(title, doc_xml, identity=lark_identity(config), dry_run=config_lark_dry_run(config), doc_format="xml")
+    result = create_doc_as_bot(title, publish_content, identity=lark_identity(config), dry_run=config_lark_dry_run(config), doc_format="markdown")
     if not result.get("ok"):
         raise WorkflowError(f"飞书文档创建失败: {json.dumps(result, ensure_ascii=False)[-800:]}")
     doc_url = extract_doc_url(result)
@@ -879,14 +882,14 @@ def _publish_lark_doc(run_id: str, step: dict[str, Any]) -> dict[str, Any]:
     )
     write_artifact(
         run_id,
-        f"{output_artifact}_xml",
-        doc_xml,
+        f"{output_artifact}_markdown",
+        publish_content,
         category="lark-doc",
         created_by="workflow",
     )
     _append_lark_doc_manifest(run_id, title=title, source_artifact=source_name, doc_url=doc_url, artifact_name=output_artifact)
     if doc_url:
-        _send_lark_text(run, f"最终交付报告飞书文档已发布：{doc_url}", event_key=f"{run_id}:final-report-doc:published")
+        _send_lark_text(run, f"{_lark_doc_publish_label(source_name, step)}飞书文档已发布：{doc_url}", event_key=f"{run_id}:{output_artifact}:published")
     return {"capability": capability, "artifact": artifact, "doc_url": doc_url, "lark_cli": result}
 
 
@@ -921,9 +924,8 @@ def _publish_prd_v2_doc_and_send_approval(run_id: str, step: dict[str, Any]) -> 
     approval_round = int(prd_v2.get("version") or 1)
     title_template = str(lark.get("prd_doc_title_template") or "{project_title}PRD")
     title = title_template.format(project_title=run["project"]["title"], project_id=run["project_id"], run_id=run_id)
-    prd_doc_xml = _compose_prd_v2_lark_xml(title, run_id, prd_v2["content"])
     _send_lark_text(run, f"PRD v2 已生成，开始创建飞书文档：{title}", event_key=f"{run_id}:prd-v2-doc:start")
-    doc_result = create_doc_as_bot(title, prd_doc_xml, identity=lark_identity(config), dry_run=dry_run, doc_format="xml")
+    doc_result = create_doc_as_bot(title, prd_doc_markdown, identity=lark_identity(config), dry_run=dry_run, doc_format="markdown")
     doc_url = extract_doc_url(doc_result)
     if not doc_url and dry_run:
         doc_url = f"dry-run://lark-doc/{run['project_id']}/prd-v2"
@@ -935,7 +937,6 @@ def _publish_prd_v2_doc_and_send_approval(run_id: str, step: dict[str, Any]) -> 
         created_by="lark-bot",
     )
     write_artifact(run_id, "prd_v2_lark_markdown", prd_doc_markdown, category="prd", created_by="workflow")
-    write_artifact(run_id, "prd_v2_lark_xml", prd_doc_xml, category="prd", created_by="workflow")
     _append_lark_doc_manifest(run_id, title=title, source_artifact="prd_v2", doc_url=doc_url, artifact_name="prd_v2_lark_doc")
     if not doc_result.get("ok"):
         payload = {"result": doc_result}
@@ -1262,6 +1263,19 @@ def _artifact_display_name(name: str) -> str:
         "test_report": "测试报告",
     }
     return labels.get(name, name)
+
+
+def _lark_doc_publish_label(source_name: str, step: dict[str, Any]) -> str:
+    labels = {
+        "prd_v2": "PRD v2",
+        "ui_design_spec": "UI 设计规范",
+        "frontend_tech_design": "前端技术方案",
+        "backend_tech_design": "服务端设计方案",
+        "test_cases": "测试用例",
+        "test_report": "测试报告",
+        "final_delivery_report": "最终交付报告",
+    }
+    return labels.get(source_name) or step.get("name") or "项目资料"
 
 
 def _normalize_review_report(content: str) -> str:
@@ -1729,12 +1743,35 @@ def _agent_output_file_content(step: dict[str, Any], artifact_name: str) -> str 
 
 def _agent_output_file_candidates(step: dict[str, Any], artifact_name: str) -> list[Path]:
     candidates: dict[str, list[Path]] = {
+        "prd_v2": [
+            artifact_root() / "prd_v2.md",
+            artifact_root() / "product-manager" / "prd" / "v1" / "prd-v2.md",
+        ],
         "ui_design_spec": [
+            artifact_root() / "ui_design_spec.md",
             artifact_root() / "DESIGN.md",
             artifact_root() / "ui-designer" / "ui" / "v1" / "ui-design-spec.md",
         ],
+        "frontend_tech_design": [
+            artifact_root() / "frontend_tech_design.md",
+            artifact_root() / "frontend-engineer" / "tech" / "v1" / "frontend-tech-design.md",
+        ],
+        "backend_tech_design": [
+            artifact_root() / "backend_tech_design.md",
+            artifact_root() / "backend-engineer" / "tech" / "v1" / "backend-tech-design.md",
+        ],
+        "tech_review_report": [
+            artifact_root() / "tech_review_report.md",
+            artifact_root() / "tech-review-board" / "tech" / "v1" / "tech-review-report.md",
+        ],
+        "dev_tasks": [
+            artifact_root() / "dev_tasks.md",
+            artifact_root() / "dev_task_breakdown.md",
+            artifact_root() / "delivery-manager" / "dev" / "v1" / "dev-tasks.md",
+        ],
         "test_cases": [
             artifact_root() / "test_cases.md",
+            artifact_root() / "qa-engineer" / "test" / "v1" / "test-cases.md",
         ],
     }
     return candidates.get(artifact_name, [])
@@ -1793,6 +1830,16 @@ def _move_to_next(run_id: str, next_step: str | None) -> None:
         )
 
 
+def _mark_run_failed(run_id: str) -> None:
+    ts = now_iso()
+    with connect() as conn:
+        conn.execute("UPDATE workflow_runs SET status = 'failed', updated_at = ? WHERE id = ?", (ts, run_id))
+        conn.execute(
+            "UPDATE projects SET status = 'failed', updated_at = ? WHERE id = (SELECT project_id FROM workflow_runs WHERE id = ?)",
+            (ts, run_id),
+        )
+
+
 def _mark_step(run_id: str, step: dict[str, Any], status_value: str, payload: dict[str, Any]) -> None:
     ts = now_iso()
     with connect() as conn:
@@ -1802,8 +1849,8 @@ def _mark_step(run_id: str, step: dict[str, Any], status_value: str, payload: di
             VALUES(?,?,?,?,?,?,?,?)
             ON CONFLICT(run_id, step_id) DO UPDATE SET
               status=excluded.status,
-              output_json=CASE WHEN excluded.status IN ('completed','blocked') THEN ? ELSE step_runs.output_json END,
-              completed_at=CASE WHEN excluded.status IN ('completed','blocked') THEN ? ELSE step_runs.completed_at END
+              output_json=CASE WHEN excluded.status IN ('completed','blocked','failed') THEN ? ELSE step_runs.output_json END,
+              completed_at=CASE WHEN excluded.status IN ('completed','blocked','failed') THEN ? ELSE step_runs.completed_at END
             """,
             (
                 new_id("step"),
