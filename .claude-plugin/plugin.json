@@ -1,6 +1,6 @@
 {
     "name": "delivery-workflow",
-    "version": "0.1.7",
+    "version": "0.1.8",
     "description": "A platform-neutral software delivery workflow worker. It keeps workflow state in SQLite, stores artifacts on disk, separates interactive gates, automated work, and notifications, and exposes CLI/MCP tools for Codex-first orchestration.",
     "author": {
         "name": "devTech-Zhang"

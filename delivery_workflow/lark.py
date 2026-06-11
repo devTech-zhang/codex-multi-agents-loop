@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
+
+from .config import _read_dotenv, lark_config, load_config
 
 
 def lark_available() -> bool:
@@ -278,9 +281,14 @@ def _find_url(value: Any) -> str | None:
 
 
 def _run_json(command: list[str], *, timeout: int, dry_run: bool) -> dict[str, Any]:
+    env = _lark_cli_env()
     if dry_run:
-        return {"ok": True, "dry_run": True, "command": command}
-    completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout)
+        payload: dict[str, Any] = {"ok": True, "dry_run": True, "command": command}
+        env_report = _lark_cli_env_report(env)
+        if env_report:
+            payload["env"] = env_report
+        return payload
+    completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=env)
     payload: dict[str, Any]
     try:
         payload = json.loads(completed.stdout or "{}")
@@ -297,6 +305,46 @@ def _run_json(command: list[str], *, timeout: int, dry_run: bool) -> dict[str, A
         payload["error_type"] = "keychain_unavailable"
         payload["remediation"] = "当前沙箱无法访问 macOS Keychain。Workflow 应返回 host_escalation 元信息，由宿主 Codex 请求在沙箱外执行同一飞书动作，或由常驻原生 worker 发送。"
     return payload
+
+
+def _lark_cli_env() -> dict[str, str] | None:
+    try:
+        sdk = lark_config(load_config()).get("sdk") or {}
+    except Exception:
+        sdk = {}
+    project_env = _read_dotenv(Path.cwd() / ".env")
+    sdk = dict(sdk)
+    if project_env.get("LARK_APP_ID"):
+        sdk["app_id"] = project_env["LARK_APP_ID"]
+    if project_env.get("LARK_APP_SECRET"):
+        sdk["app_secret"] = project_env["LARK_APP_SECRET"]
+    app_id = str(sdk.get("app_id") or "").strip()
+    app_secret = str(sdk.get("app_secret") or "").strip()
+    if not app_id and not app_secret:
+        return None
+    env = os.environ.copy()
+    if app_id:
+        env["LARK_APP_ID"] = app_id
+    if app_secret:
+        env["LARK_APP_SECRET"] = app_secret
+    return env
+
+
+def _lark_cli_env_report(env: dict[str, str] | None) -> dict[str, str]:
+    if not env:
+        return {}
+    report: dict[str, str] = {}
+    if env.get("LARK_APP_ID"):
+        report["LARK_APP_ID"] = _mask_app_id(env["LARK_APP_ID"])
+    if env.get("LARK_APP_SECRET"):
+        report["LARK_APP_SECRET"] = "***"
+    return report
+
+
+def _mask_app_id(app_id: str) -> str:
+    if len(app_id) <= 8:
+        return app_id
+    return f"{app_id[:6]}...{app_id[-4:]}"
 
 
 def _is_keychain_unavailable(payload: dict[str, Any]) -> bool:
