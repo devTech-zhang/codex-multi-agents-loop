@@ -4,6 +4,7 @@ import json
 import sys
 from typing import Any
 
+from . import __version__
 from .capabilities import doctor
 from .config import initialize_project_workspace, lark_dry_run, lark_enabled, load_config
 from .engine import (
@@ -173,7 +174,7 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
     msg_id = message.get("id")
     try:
         if method == "initialize":
-            return {"jsonrpc": "2.0", "id": msg_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "delivery-workflow", "version": "0.1.0"}}}
+            return {"jsonrpc": "2.0", "id": msg_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}}, "serverInfo": {"name": "delivery-workflow", "version": __version__}}}
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
