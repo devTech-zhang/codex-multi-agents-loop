@@ -1,6 +1,6 @@
 [project]
 name = "delivery-workflow"
-version = "0.1.6"
+version = "0.1.7"
 description = "Platform-neutral software delivery workflow worker"
 requires-python = ">=3.10"
 dependencies = [

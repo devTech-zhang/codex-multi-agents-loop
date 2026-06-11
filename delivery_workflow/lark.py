@@ -30,7 +30,7 @@ def create_doc_as_bot(
         "v2",
     ]
     content_path = _write_doc_content_file(title, content, doc_format=doc_format)
-    command.extend(["--doc-format", doc_format, "--content", f"@{content_path}"])
+    command.extend(["--doc-format", doc_format, "--content", _content_file_arg(content_path)])
     return _run_json(command, timeout=120, dry_run=dry_run)
 
 
@@ -51,6 +51,14 @@ def _write_doc_content_file(title: str, content: str, *, doc_format: str) -> Pat
             body = f"<title>{_xml_text(title)}</title>\n\n{body}" if body else f"<title>{_xml_text(title)}</title>"
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def _content_file_arg(path: Path) -> str:
+    try:
+        content_path = path.relative_to(Path.cwd())
+    except ValueError:
+        content_path = path
+    return f"@{content_path}"
 
 
 def _xml_text(text: str) -> str:

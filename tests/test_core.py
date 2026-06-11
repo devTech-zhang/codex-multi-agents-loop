@@ -332,6 +332,7 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertNotIn("--title", command_text)
         self.assertNotIn("<doc>", command_text)
         content_arg = prd_doc["result"]["command"][prd_doc["result"]["command"].index("--content") + 1]
+        self.assertFalse(Path(content_arg[1:]).is_absolute())
         content_file = Path(content_arg[1:])
         self.assertTrue(content_file.exists())
         self.assertTrue(content_file.read_text(encoding="utf-8").startswith("# 客户退款审批PRD\n"))
@@ -626,6 +627,8 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         self.assertIn("--doc-format\nmarkdown", command_text)
         self.assertIn("--content\n@", command_text)
         self.assertNotIn("--title", command_text)
+        content_arg = command[command.index("--content") + 1]
+        self.assertFalse(Path(content_arg[1:]).is_absolute())
         final_doc_markdown = read_artifact(run_id, "final_report_lark_doc_markdown")["content"]
         self.assertIn("最终交付报告", final_doc_markdown)
         with connect() as conn:
