@@ -18,7 +18,7 @@ from delivery_workflow.config import DEFAULT_CONFIG_TEMPLATE, PLUGIN_ROOT, WORKS
 from delivery_workflow.definitions import load_workflow
 from delivery_workflow.engine import WorkflowError, create_project, current_project_status, delete_current_project, emit_event, enqueue_step, execute_step, handle_lark_card_event, read_artifact, request_bug_fix, retry_prd_approval_lark, run_worker_once, run_worker_until_blocked, status, submit_gate, watch_run, write_artifact
 from delivery_workflow.engine import _compose_lark_doc_xml, _compose_prd_v2_lark_markdown, _host_escalation_payload, _host_lark_retry_command
-from delivery_workflow.lark import _is_keychain_unavailable, build_prd_approval_card, create_doc_as_bot
+from delivery_workflow.lark import _is_keychain_unavailable, build_prd_approval_card, create_doc_as_bot, run_project_lark_cli
 from delivery_workflow.lark_daemon import _code_fingerprint, _terminate_process, ensure_lark_event_consumer
 from delivery_workflow.host_hooks import main as host_hook_main
 from delivery_workflow.lark_events import sdk_event_to_payload
@@ -131,6 +131,45 @@ class SoftwareDeliveryWorkflowTest(unittest.TestCase):
         env = run.call_args.kwargs["env"]
         self.assertEqual(env["LARK_APP_ID"], "cli_project")
         self.assertEqual(env["LARK_APP_SECRET"], "secret_project")
+        self.assertEqual(result["env"]["LARK_APP_ID"], "cli_pr...ject")
+        self.assertEqual(result["env"]["LARK_APP_SECRET"], "***")
+        self.assertNotIn("secret_project", json.dumps(result, ensure_ascii=False))
+
+    def test_project_env_overrides_process_lark_environment(self) -> None:
+        Path(".env").write_text(
+            "LARK_CHAT_ID=oc_project\nLARK_APP_ID=cli_project\nLARK_APP_SECRET=secret_project\n",
+            encoding="utf-8",
+        )
+
+        with patch.dict(
+            os.environ,
+            {"LARK_CHAT_ID": "oc_global", "LARK_APP_ID": "cli_global", "LARK_APP_SECRET": "secret_global"},
+        ):
+            config = load_config()
+            credentials = load_sdk_credentials(config)
+
+        self.assertEqual(lark_chat_id(config), "oc_project")
+        self.assertEqual(credentials.app_id, "cli_project")
+        self.assertEqual(credentials.app_secret, "secret_project")
+
+    def test_lark_cli_wrapper_injects_project_env_credentials(self) -> None:
+        Path(".env").write_text(
+            "LARK_APP_ID=cli_project\nLARK_APP_SECRET=secret_project\n",
+            encoding="utf-8",
+        )
+
+        class FakeCompleted:
+            returncode = 0
+            stdout = json.dumps({"ok": True})
+            stderr = ""
+
+        with patch("delivery_workflow.lark.subprocess.run", return_value=FakeCompleted()) as run:
+            result = run_project_lark_cli(["auth", "status"])
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(run.call_args.args[0], ["lark-cli", "auth", "status"])
+        self.assertEqual(run.call_args.kwargs["env"]["LARK_APP_ID"], "cli_project")
+        self.assertEqual(result["env"]["LARK_APP_SECRET"], "***")
         self.assertNotIn("secret_project", json.dumps(result, ensure_ascii=False))
 
     def test_workflow_definition_separates_step_categories(self) -> None:

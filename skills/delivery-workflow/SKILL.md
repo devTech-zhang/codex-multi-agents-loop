@@ -77,6 +77,8 @@ PRD v1
 ## Feishu/Lark Notes
 
 - PRD v2、UI 设计规范、技术方案、测试用例、测试报告和最终报告要整理为带标题与表格结构的 XML 后发布飞书文档。
+- 当前项目 `.env` 中的 `LARK_APP_ID`、`LARK_APP_SECRET`、`LARK_CHAT_ID` 优先于全局 `lark-cli` 配置和宿主环境变量。
+- 不要直接裸跑 `lark-cli ...` 处理项目飞书动作；需要 CLI 兜底时使用 `deliveryflow lark cli -- ...`，该包装命令会自动注入当前项目 `.env`。
 - 审批卡片监听 `card.action.trigger`，项目创建由 MCP 工具或 CLI 显式触发。
 - 如果卡片发出后停在 `prd-approval`，调用 `delivery_watch_run` 等回调和后台 worker 稳定。
 - 如果遇到 `keychain Get failed: keychain not initialized`，使用事件里的 `host_escalation.command` 请求沙箱外执行，不要把 app secret 写入仓库。

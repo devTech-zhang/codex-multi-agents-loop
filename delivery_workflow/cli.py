@@ -8,6 +8,7 @@ from typing import Any
 from .capabilities import doctor, install_lark_cli
 from .config import config_sources, initialize_project_workspace, load_config
 from .lark_events import run_lark_long_connection_consumer
+from .lark import run_project_lark_cli
 from .engine import (
     WorkflowError,
     create_project,
@@ -122,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     lark_sub.add_parser("event-consumer")
     retry_prd = lark_sub.add_parser("retry-prd-approval")
     retry_prd.add_argument("--run-id", required=True)
+    lark_cli = lark_sub.add_parser("cli")
+    lark_cli.add_argument("args", nargs=argparse.REMAINDER)
 
     args = parser.parse_args(argv)
     try:
@@ -244,6 +247,12 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
             return 0
         if args.lark_command == "retry-prd-approval":
             print_json(retry_prd_approval_lark(args.run_id))
+            return 0
+        if args.lark_command == "cli":
+            cli_args = list(args.args or [])
+            if cli_args and cli_args[0] == "--":
+                cli_args = cli_args[1:]
+            print_json(run_project_lark_cli(cli_args))
             return 0
     parser.print_help()
     return 2

@@ -282,9 +282,9 @@ def _find_url(value: Any) -> str | None:
 
 def _run_json(command: list[str], *, timeout: int, dry_run: bool) -> dict[str, Any]:
     env = _lark_cli_env()
+    env_report = _lark_cli_env_report(env)
     if dry_run:
         payload: dict[str, Any] = {"ok": True, "dry_run": True, "command": command}
-        env_report = _lark_cli_env_report(env)
         if env_report:
             payload["env"] = env_report
         return payload
@@ -297,6 +297,8 @@ def _run_json(command: list[str], *, timeout: int, dry_run: bool) -> dict[str, A
     payload.setdefault("ok", completed.returncode == 0)
     payload["returncode"] = completed.returncode
     payload["command"] = command
+    if env_report:
+        payload["env"] = env_report
     if completed.stderr:
         payload["stderr"] = completed.stderr[-4000:]
     if completed.stdout and not payload:
@@ -305,6 +307,26 @@ def _run_json(command: list[str], *, timeout: int, dry_run: bool) -> dict[str, A
         payload["error_type"] = "keychain_unavailable"
         payload["remediation"] = "当前沙箱无法访问 macOS Keychain。Workflow 应返回 host_escalation 元信息，由宿主 Codex 请求在沙箱外执行同一飞书动作，或由常驻原生 worker 发送。"
     return payload
+
+
+def run_project_lark_cli(args: list[str], *, timeout: int = 120) -> dict[str, Any]:
+    if not args:
+        return {"ok": False, "error": "missing lark-cli arguments"}
+    command = ["lark-cli", *args]
+    env = _lark_cli_env()
+    completed = subprocess.run(command, check=False, capture_output=True, text=True, timeout=timeout, env=env)
+    result: dict[str, Any] = {"ok": completed.returncode == 0, "returncode": completed.returncode, "command": command}
+    env_report = _lark_cli_env_report(env)
+    if env_report:
+        result["env"] = env_report
+    if completed.stdout:
+        try:
+            result["stdout_json"] = json.loads(completed.stdout)
+        except json.JSONDecodeError:
+            result["stdout"] = completed.stdout[-4000:]
+    if completed.stderr:
+        result["stderr"] = completed.stderr[-4000:]
+    return result
 
 
 def _lark_cli_env() -> dict[str, str] | None:

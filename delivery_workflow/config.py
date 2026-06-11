@@ -258,10 +258,11 @@ def _read_dotenv(env_file: Path) -> dict[str, str]:
 def _apply_env_overrides(config: dict[str, Any], env_vals: dict[str, str] | None = None) -> None:
     """Merge env values into config, taking precedence over config.json values.
     Checks both the provided dict (from .env file) and os.environ (always).
-    os.environ takes precedence over .env values.
+    The current project .env takes precedence over process-wide environment
+    values because one shell or lark-cli installation may serve many projects.
     """
     for env_key, config_path in _ENV_CONFIG_MAP.items():
-        value = os.environ.get(env_key) or (env_vals or {}).get(env_key)
+        value = (env_vals or {}).get(env_key) or os.environ.get(env_key)
         if value:
             _deep_set(config, config_path, value)
 
