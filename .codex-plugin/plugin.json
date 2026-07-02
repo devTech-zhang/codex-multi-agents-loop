@@ -1,7 +1,7 @@
 {
-    "name": "delivery-workflow",
+    "name": "codex-delivery-workflow",
     "version": "0.1.13",
-    "description": "Platform-neutral delivery Workflow Worker and multi-agent orchestration for Codex.",
+    "description": "面向 Codex 的轻量交付工作流插件，用于验证状态流转、产物归档和多子 Agent 协作。",
     "author": {
         "name": "devTech-Zhang"
     },
@@ -9,20 +9,20 @@
     "skills": "./skills/",
     "repository": "https://github.com/devTech-zhang/multi-agent-delivery-workflow.git",
     "interface": {
-        "displayName": "Delivery Workflow",
-        "shortDescription": "Run file-based delivery workflows with gates, workers, and agents.",
-        "longDescription": "A platform-neutral software delivery workflow worker. It keeps workflow state in SQLite, stores artifacts on disk, separates interactive gates, automated work, and notifications, and exposes CLI/MCP tools for Codex-first orchestration.",
+        "displayName": "Codex 交付工作流",
+        "shortDescription": "用五个子 Agent 跑通轻量交付流程。",
+        "longDescription": "这是一个 Codex 优先的轻量交付工作流插件。它使用 SQLite 记录状态，按 workflow/*.toml 推进步骤，按 agents/*.toml 派发子 Agent，并通过最小 MCP 工具集验证多 Agent 协作是否可行。",
         "developerName": "devTech-Zhang",
         "category": "workflow",
         "capabilities": ["Interactive", "Write", "MCP"],
         "defaultPrompt": [
-            "Start a delivery workflow",
-            "Check delivery workflow status",
-            "Run the delivery worker once"
+            "启动 Codex 交付工作流",
+            "查看交付工作流状态",
+            "推进一次交付工作流"
         ],
         "brandColor": "#2563EB",
-        "logo": "./assets/delivery-workflow-logo.png",
-        "composerIcon": "./assets/delivery-workflow-logo.png"
+        "logo": "./assets/codex-delivery-workflow-logo.png",
+        "composerIcon": "./assets/codex-delivery-workflow-logo.png"
     },
     "mcpServers": "./.codex-plugin/mcp.json"
 }

@@ -1,4 +1,4 @@
-"""Platform-neutral software delivery workflow core."""
+"""Codex 交付工作流核心。"""
 
 __all__ = ["__version__"]
 

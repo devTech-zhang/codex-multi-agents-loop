@@ -1,0 +1,25 @@
+{
+  "storage": {
+    "home": ".codex-delivery-workflow",
+    "db": ".codex-delivery-workflow/workflow.db",
+    "artifact_root": "delivery-artifacts",
+    "source_root": "delivery-workspace",
+    "logs": ".codex-delivery-workflow/logs"
+  },
+  "workflow": {
+    "auto_start": true,
+    "auto_run_to_idle": true,
+    "max_auto_jobs": 20,
+    "watch_poll_interval_seconds": 2.0
+  },
+  "code_platforms": {
+    "default": "codex",
+    "enable_agent_cli": false,
+    "executors": {
+      "codex": {
+        "binary_candidates": ["codex"],
+        "command": ["{binary}", "exec", "--file", "{prompt_path}"]
+      }
+    }
+  }
+}

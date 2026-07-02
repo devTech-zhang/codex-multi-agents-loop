@@ -5,7 +5,7 @@
     },
     "plugins": [
         {
-            "name": "delivery-workflow",
+            "name": "codex-delivery-workflow",
             "policy": {
                 "installation": "AVAILABLE",
                 "authentication": "ON_INSTALL"

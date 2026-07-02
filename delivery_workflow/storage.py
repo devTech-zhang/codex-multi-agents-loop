@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS projects (
   platform TEXT NOT NULL,
   source TEXT NOT NULL,
   owner_id TEXT,
-  lark_chat_id TEXT,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -130,9 +129,7 @@ def init_db() -> Path:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    project_columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
-    if "lark_chat_id" not in project_columns:
-        conn.execute("ALTER TABLE projects ADD COLUMN lark_chat_id TEXT")
+    return None
 
 
 @contextmanager

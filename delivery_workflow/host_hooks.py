@@ -24,7 +24,7 @@ DESTRUCTIVE_COMMAND_PATTERNS = [
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Delivery Workflow host hook entrypoint.")
+    parser = argparse.ArgumentParser(description="Codex 交付工作流宿主 hook 入口。")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("record-file-change")
     sub.add_parser("record-command")
@@ -60,7 +60,7 @@ def _read_hook_payload() -> dict[str, Any]:
 
 def _record_event(event: str, message: str, payload: dict[str, Any]) -> None:
     entry = {"timestamp": now_iso(), "event": event, "message": message, "payload": _sanitize(payload)}
-    path = Path.cwd() / ".delivery-workflow" / "logs" / "host-hooks.jsonl"
+    path = Path.cwd() / ".codex-delivery-workflow" / "logs" / "host-hooks.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
@@ -135,22 +135,22 @@ def _blocked_command_reason(command: str) -> str | None:
     lowered = command.lower()
     for pattern in DESTRUCTIVE_COMMAND_PATTERNS:
         if re.search(pattern, lowered):
-            return "Delivery Workflow hook blocked a destructive command; ask the user before running it."
+            return "Codex 交付工作流 hook 阻止了高风险删除或重置命令；执行前需要先确认。"
     for pattern in SENSITIVE_COMMAND_PATTERNS:
         if re.search(pattern, lowered):
-            return "Delivery Workflow hook blocked a command that may expose environment secrets."
+            return "Codex 交付工作流 hook 阻止了可能暴露环境密钥的命令。"
     return None
 
 
 def _target_area(path: str) -> str:
     normalized = path.replace("\\", "/")
-    if "/source-code/frontend/" in normalized or normalized.startswith("source-code/frontend/"):
+    if "/delivery-workspace/frontend/" in normalized or normalized.startswith("delivery-workspace/frontend/"):
         return "frontend"
-    if "/source-code/backend/" in normalized or normalized.startswith("source-code/backend/"):
+    if "/delivery-workspace/backend/" in normalized or normalized.startswith("delivery-workspace/backend/"):
         return "backend"
-    if "/delivery-project/" in normalized or normalized.startswith("delivery-project/"):
+    if "/delivery-artifacts/" in normalized or normalized.startswith("delivery-artifacts/"):
         return "artifact"
-    if "/.delivery-workflow/" in normalized or normalized.startswith(".delivery-workflow/"):
+    if "/.codex-delivery-workflow/" in normalized or normalized.startswith(".codex-delivery-workflow/"):
         return "workflow-state"
     return "other"
 
@@ -183,7 +183,7 @@ def _sanitize(value: Any) -> Any:
 
 
 def _sanitize_command(command: str) -> str:
-    sanitized = re.sub(r"(LARK_APP_SECRET|APP_SECRET|TOKEN|PASSWORD|SECRET)=\S+", r"\1=***", command)
+    sanitized = re.sub(r"(APP_SECRET|TOKEN|PASSWORD|SECRET)=\S+", r"\1=***", command)
     sanitized = re.sub(r"(--?(?:token|password|secret|app-secret)\s+)\S+", r"\1***", sanitized, flags=re.IGNORECASE)
     return sanitized[-4000:]
 

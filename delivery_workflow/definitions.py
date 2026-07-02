@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .paths import DEFAULT_WORKFLOW_ID, PACKAGE_ROOT, WORKFLOW_FILE
+from .paths import AGENT_ROOT, DEFAULT_WORKFLOW_ID, PLUGIN_ROOT, WORKFLOW_ROOT
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,8 @@ class WorkflowDefinition:
 
 
 def load_workflow(workflow_id: str = DEFAULT_WORKFLOW_ID) -> WorkflowDefinition:
-    data = json.loads(WORKFLOW_FILE.read_text(encoding="utf-8"))
+    path = WORKFLOW_ROOT / f"{workflow_id}.toml"
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
     if workflow_id != data["id"]:
         raise KeyError(f"unknown workflow: {workflow_id}")
     return WorkflowDefinition(
@@ -42,10 +44,28 @@ def load_workflow(workflow_id: str = DEFAULT_WORKFLOW_ID) -> WorkflowDefinition:
         name=data["name"],
         version=data["version"],
         steps=list(data["steps"]),
-        root=PACKAGE_ROOT,
+        root=PLUGIN_ROOT,
     )
 
 
 def list_workflows() -> list[dict[str, str]]:
-    data = json.loads(WORKFLOW_FILE.read_text(encoding="utf-8"))
-    return [{"id": data["id"], "name": data["name"], "version": data["version"]}]
+    workflows: list[dict[str, str]] = []
+    for path in sorted(WORKFLOW_ROOT.glob("*.toml")):
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        workflows.append({"id": data["id"], "name": data["name"], "version": data["version"]})
+    return workflows
+
+
+def load_agent_profile(agent_id: str) -> dict[str, Any]:
+    path = AGENT_ROOT / f"{agent_id}.toml"
+    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    if data.get("id") != agent_id:
+        raise KeyError(f"agent profile id mismatch: {agent_id}")
+    return data
+
+
+def list_agent_profiles() -> list[dict[str, Any]]:
+    profiles: list[dict[str, Any]] = []
+    for path in sorted(AGENT_ROOT.glob("*.toml")):
+        profiles.append(tomllib.loads(path.read_text(encoding="utf-8")))
+    return profiles

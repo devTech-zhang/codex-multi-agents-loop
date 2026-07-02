@@ -20,10 +20,6 @@ class PlatformCommand:
 
 def select_dev_executor(platform: str) -> str:
     normalized = normalize_platform(platform)
-    if normalized == "codex":
-        return "codex"
-    if normalized in {"claude-code", "openclaw"}:
-        return "claude"
     return "codex"
 
 
@@ -32,7 +28,7 @@ def build_agent_command(platform: str, prompt_path: Path) -> PlatformCommand:
     normalized = normalize_platform(platform)
     executor = select_dev_executor(normalized)
     enabled = bool((config.get("code_platforms") or {}).get("enable_agent_cli"))
-    command_key = "claude-code" if executor == "claude" else normalized
+    command_key = "codex"
     command_config = ((config.get("code_platforms") or {}).get("executors") or {}).get(command_key, {})
     binary_candidates = command_config.get("binary_candidates") or _default_binary_candidates(command_key)
     binary = _first_available_binary(binary_candidates)
@@ -105,14 +101,10 @@ def _first_available_binary(candidates: list[str]) -> str | None:
 
 
 def _default_binary_candidates(platform: str) -> list[str]:
-    if platform == "claude-code":
-        return ["claude"]
-    return [platform]
+    return ["codex"]
 
 
 def _default_command_template(platform: str) -> list[str]:
-    if platform == "claude-code":
-        return ["{binary}", "--disable-slash-commands", "--permission-mode", "acceptEdits", "-p"]
     return ["{binary}", "exec", "--file", "{prompt_path}"]
 
 

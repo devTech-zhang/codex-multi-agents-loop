@@ -1,12 +1,12 @@
 [project]
-name = "delivery-workflow"
+name = "codex-delivery-workflow"
 version = "0.1.11"
-description = "Platform-neutral software delivery workflow worker"
-requires-python = ">=3.10"
+description = "面向 Codex 的轻量交付工作流插件"
+requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-deliveryflow = "delivery_workflow.cli:main"
+codex-deliveryflow = "delivery_workflow.cli:main"
 
 [tool.setuptools.package-data]
-delivery_workflow = ["workflow.yaml", "references/*.md"]
+delivery_workflow = []
