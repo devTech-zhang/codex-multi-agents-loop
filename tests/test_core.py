@@ -45,6 +45,15 @@ EXPECTED_AGENT_SKILLS = {
     "qa-tester": ["codex-delivery-qa"],
 }
 
+EXPECTED_AGENT_REASONING = {
+    "delivery-manager": "medium",
+    "product-manager": "high",
+    "ui-designer": "high",
+    "frontend-impl": "high",
+    "backend-impl": "high",
+    "qa-tester": "high",
+}
+
 
 def _has_cjk(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
@@ -104,8 +113,8 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             profile = tomllib.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(profile["id"], agent)
             self.assertIn(profile["agent_type"], {"worker", "explorer"})
-            self.assertEqual(profile["model"], "gpt-5")
-            self.assertEqual(profile["model_reasoning_effort"], "high")
+            self.assertEqual(profile["model"], "gpt-5.5")
+            self.assertEqual(profile["model_reasoning_effort"], EXPECTED_AGENT_REASONING[agent])
             self.assertEqual(profile["sandbox_mode"], "workspace-write")
             self.assertGreaterEqual(len(profile["nickname_candidates"]), 3)
             self.assertEqual(profile["skills"], EXPECTED_AGENT_SKILLS[agent])
@@ -189,14 +198,28 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertFalse((ROOT / "skills" / "codex-workflow").exists())
         self.assertFalse((ROOT / "codex-workflow.config.json").exists())
 
-    def test_create_project_prepares_first_runtime_subagent_dispatch(self) -> None:
+    def test_create_project_prepares_native_agent_handoff_without_claiming_job(self) -> None:
         created = create_project(requirement="做一个极简 TODO Web 应用", title="TODO Web")
         run_id = created["run_id"]
 
         current = status(run_id)
         self.assertEqual(current["run"]["workflow_id"], PLUGIN_NAME)
-        self.assertEqual(created["execution_policy"]["mode"], "runtime_subagent")
+        self.assertEqual(created["execution_policy"]["mode"], "native_agent_handoff")
         self.assertNotIn("enable_agent_cli", created["execution_policy"])
+        handoff = created["next_handoff"]
+        self.assertTrue(handoff["ok"])
+        self.assertFalse(handoff["idle"])
+        self.assertEqual(handoff["run_id"], run_id)
+        self.assertEqual(handoff["step_id"], "product-manager")
+        self.assertEqual(handoff["agent"], "product-manager")
+        self.assertEqual(handoff["mention"], "@product-manager")
+        self.assertEqual(handoff["claim_tool"], "codex_delivery_workflow_dispatch_next")
+        self.assertEqual(handoff["complete_tool"], "codex_delivery_workflow_complete_agent_step")
+        self.assertIn("@product-manager", handoff["handoff_message"])
+        self.assertIn("codex_delivery_workflow_dispatch_next", handoff["handoff_message"])
+        self.assertIn(run_id, handoff["handoff_message"])
+        self.assertNotIn("runtime", handoff)
+        self.assertNotIn("spawn_agent", json.dumps(handoff, ensure_ascii=False))
         self.assertEqual(current["run"]["status"], "prd_draft")
         self.assertEqual(current["run"]["current_step"], "product-manager")
         self.assertEqual(current["run"]["prd_version"], 0)
@@ -207,10 +230,14 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(current["gates"], [])
 
         artifact_names = {artifact["name"] for artifact in current["artifacts"]}
-        self.assertEqual({"raw_requirement", "project_context"}, artifact_names)
+        self.assertEqual({"raw_requirement", "project_context", "product-manager_agent_task"}, artifact_names)
 
+        self.assertTrue(hasattr(engine, "prepare_agent_handoff"))
         self.assertTrue(hasattr(engine, "dispatch_next_agent_task"))
         self.assertTrue(engine.dispatch_next_agent_task(run_id=run_id, agent="ui-designer")["idle"])
+        still_pending = status(run_id)
+        self.assertEqual(still_pending["jobs"][0]["status"], "pending")
+        self.assertEqual(still_pending["step_runs"], [])
         dispatch = engine.dispatch_next_agent_task(run_id=run_id, agent="product-manager")
         self.assertTrue(dispatch["ok"])
         self.assertFalse(dispatch["idle"])
@@ -218,11 +245,15 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(dispatch["step_id"], "product-manager")
         self.assertEqual(dispatch["agent"], "product-manager")
         self.assertEqual(dispatch["agent_type"], "worker")
+        self.assertEqual(dispatch["model"], "gpt-5.5")
+        self.assertEqual(dispatch["model_reasoning_effort"], "high")
         self.assertEqual(dispatch["skills"], ["codex-delivery-prd"])
-        self.assertIn("spawn_agent", dispatch["runtime"])
-        self.assertIn("product-manager", dispatch["spawn_message"])
-        self.assertIn("做一个极简 TODO Web 应用", dispatch["spawn_message"])
-        self.assertIn("PRD V1", dispatch["spawn_message"])
+        self.assertEqual(dispatch["claim_mode"], "native_project_agent")
+        self.assertNotIn("runtime", dispatch)
+        self.assertNotIn("spawn_agent", json.dumps(dispatch, ensure_ascii=False))
+        self.assertIn("product-manager", dispatch["task_message"])
+        self.assertIn("做一个极简 TODO Web 应用", dispatch["task_message"])
+        self.assertIn("PRD V1", dispatch["task_message"])
         self.assertTrue((Path(".codex") / "agents" / "delivery-manager.toml").exists())
         self.assertTrue((Path(".codex") / "delivery-workflow" / "memory" / "product-manager.md").exists())
 
@@ -357,6 +388,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
                 "codex_delivery_workflow_init_project",
                 "codex_delivery_workflow_create",
                 "codex_delivery_workflow_status",
+                "codex_delivery_workflow_prepare_handoff",
                 "codex_delivery_workflow_dispatch_next",
                 "codex_delivery_workflow_complete_agent_step",
                 "codex_delivery_workflow_manager_summary",
@@ -414,6 +446,8 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             "maybe_run_command",
             "host_hook",
             "worker_daemon",
+            "runtime_subagent",
+            "spawn_agent",
         ]:
             self.assertNotIn(forbidden, combined)
 

@@ -16,6 +16,6 @@ def doctor() -> dict[str, Any]:
         "execution": {
             "ok": bool(codex),
             "codex_binary": codex,
-            "note": "真实子 Agent 执行依赖 Codex runtime 的 spawn_agent；MCP 只负责状态流转和产物归档。",
+            "note": "真实子 Agent 执行依赖当前项目的 .codex/agents 和 @ 点名；MCP 只负责交接、领取、状态流转和产物归档。",
         },
     }

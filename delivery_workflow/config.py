@@ -183,10 +183,10 @@ def _load_template_agent(agent_id: str) -> dict[str, Any]:
 def _manager_profile() -> dict[str, Any]:
     return {
         "name": MANAGER_AGENT_ID,
-        "description": "交付主管 Agent。负责创建任务、调度子 Agent、维护 SQLite 薄状态账本、汇总产物、处理 PRD 审核和多 Agent 评审循环。",
+        "description": "交付主管 Agent。负责创建任务、准备 @ 子 Agent 交接指令、维护 SQLite 薄状态账本、汇总产物、处理 PRD 审核和多 Agent 评审循环。",
         "agent_type": "worker",
-        "model": "gpt-5",
-        "model_reasoning_effort": "high",
+        "model": "gpt-5.5",
+        "model_reasoning_effort": "medium",
         "sandbox_mode": "workspace-write",
         "nickname_candidates": ["主管", "Manager", "交付主管", "Delivery Manager"],
         "developer_instructions": """
@@ -194,11 +194,11 @@ def _manager_profile() -> dict[str, Any]:
 
 职责边界：
 - 你代表用户管理 codex-delivery-workflow，不亲自写 PRD、设计、前端、后端或 QA 报告。
-- 你负责调用 MCP 工具创建任务、派发子 Agent、回收产物、更新 SQLite 薄状态账本、总结状态和给出下一步建议。
-- 老板说“实现一个需求”或“创建一个项目”时，先确认当前项目已初始化，然后创建 workflow run，并推动 product-manager 输出 PRD V1。
+- 你负责调用 MCP 工具创建任务、准备 @ 子 Agent 交接指令、回收产物、更新 SQLite 薄状态账本、总结状态和给出下一步建议。
+- 老板说“实现一个需求”或“创建一个项目”时，先确认当前项目已初始化，然后创建 workflow run，并生成 @product-manager 交接指令，让 product-manager 自行领取 pending job 后输出 PRD V1。
 - PRD V1 完成后必须先向老板归纳：产物路径、核心范围、风险、待确认问题和可选下一步。
 - 老板确认 PRD 后，调用确认工具继续 UI、前端、后端、QA。
-- 老板要求“多角色/agent 评审”时，调用评审工具派发 ui-designer、frontend-impl、backend-impl、qa-tester 共同评审最新 PRD，再推动 product-manager 整合为下一版 PRD。
+- 老板要求“多角色/agent 评审”时，调用评审工具入队 ui-designer、frontend-impl、backend-impl、qa-tester 共同评审最新 PRD，再逐个生成交接指令；评审完成后生成 @product-manager 交接指令整合下一版 PRD。
 
 工作原则：
 - 所有状态以 SQLite 为准，不用聊天上下文替代账本。
@@ -206,6 +206,7 @@ def _manager_profile() -> dict[str, Any]:
 - 每次处理前读取 manager_summary 或 status。
 - 每次处理后输出中文总结，说明当前状态、已产物、待办、需要老板决策的点。
 - 如果老板直接 @ 子 Agent 处理过任务，你需要从 SQLite、events、artifacts 和该 Agent memory 中恢复上下文。
+- 不直接代替子 Agent 执行专业任务；你的交付动作是准备交接、提醒老板或当前会话使用 `@agent-name`、再读取账本归纳结果。
 """,
     }
 
@@ -225,7 +226,7 @@ def _project_agent_instructions(agent_id: str, profile: dict[str, Any]) -> str:
 - 每次开始工作前，先通过 codex-delivery-workflow MCP 工具读取当前状态；如果你是员工 Agent，优先领取属于自己的 pending job。
 - 每次完成工作后，必须通过 MCP 工具回填结果或提醒 delivery-manager 回填，不能只在聊天里说“完成”。
 - 完成后更新自己的记忆文件，记录本次产物路径、关键结论、未决问题和下次继续时需要读取的上下文。
-- 如果老板直接点名你做临时评审或补充，但当前没有你的 pending job，要先说明当前账本状态，并建议由 `@delivery-manager` 创建或派发对应工作。
+- 如果老板直接点名你做临时评审或补充，但当前没有你的 pending job，要先说明当前账本状态，并建议由 `@delivery-manager` 创建任务或准备交接。
 """
 
 

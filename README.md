@@ -10,7 +10,7 @@
 - 薄状态账本：SQLite 只记录 project、run、job、step、artifact、review、event 和 agent memory 的状态、版本、路径和短摘要；完整需求、PRD、设计、实现和测试报告都放在文件产物里。
 - PRD 审核循环：PRD V1 先给老板确认；老板可要求多 Agent 评审，由产品 Agent 整合为 V2/V3。
 - 产物归档：所有产物写入 `docs/delivery/`，按 run、Agent、类别和版本归档。
-- 主管汇总：`delivery-manager` 负责状态总结、产物归纳、阻塞点和下一步建议。
+- 主管交接与汇总：`delivery-manager` 负责创建 run、准备 `@子 Agent` 交接指令、状态总结、产物归纳、阻塞点和下一步建议。
 
 暂不包含审批、外部通知、飞书、质量门禁循环、跨平台适配和复杂发布流程。
 
@@ -67,7 +67,8 @@ workflow.config.json
 ```text
 老板提出需求
 -> delivery-manager 创建 run
--> product-manager 输出 PRD V1
+-> delivery-manager 输出 @product-manager 交接指令
+-> product-manager 领取任务并输出 PRD V1
 -> delivery-manager 汇总 V1 给老板
 -> 老板确认 PRD 或要求多 Agent 评审
 ```
@@ -86,6 +87,7 @@ ui-designer
 
 ```text
 ui-designer / frontend-impl / backend-impl / qa-tester 并行评审最新 PRD
+-> delivery-manager 逐个输出 @子 Agent 交接指令
 -> product-manager 整合意见输出下一版 PRD
 -> delivery-manager 再次归纳给老板
 -> 老板确认或继续评审
@@ -98,6 +100,7 @@ codex_delivery_workflow_init
 codex_delivery_workflow_init_project
 codex_delivery_workflow_create
 codex_delivery_workflow_status
+codex_delivery_workflow_prepare_handoff
 codex_delivery_workflow_dispatch_next
 codex_delivery_workflow_complete_agent_step
 codex_delivery_workflow_manager_summary
@@ -110,16 +113,16 @@ codex_delivery_workflow_inspect
 
 ## 主管执行约定
 
-`delivery-manager` 不亲自写 PRD、设计、前端、后端或 QA 报告。它只做调度和归纳：
+`delivery-manager` 不亲自写 PRD、设计、前端、后端或 QA 报告。它只做交接和归纳：
 
 1. 创建或读取 run。
-2. 派发对应 Agent。
-3. 等待 Agent 输出。
+2. 调用 `codex_delivery_workflow_prepare_handoff` 准备对应 Agent 的 `@` 交接指令。
+3. 提醒老板或当前会话用交接指令点名对应 Agent。
 4. 回填产物和状态。
 5. 更新或读取 Agent memory。
 6. 汇总当前状态、产物路径、阻塞点和下一步。
 
-员工被老板直接 `@` 时，也必须先读取状态账本和自己的 memory。若有属于自己的 pending job，就领取并回填；若没有待办，要说明当前状态并建议由 `@delivery-manager` 派发。需要查看完整需求或产物正文时，通过产物路径或读取产物工具获取，不要把完整正文长期塞进状态总结。
+员工被老板直接 `@` 时，也必须先读取状态账本和自己的 memory。若有属于自己的 pending job，就调用 `codex_delivery_workflow_dispatch_next` 领取并回填；若没有待办，要说明当前状态并建议由 `@delivery-manager` 创建任务或准备交接。需要查看完整需求或产物正文时，通过产物路径或读取产物工具获取，不要把完整正文长期塞进状态总结。
 
 ## 本地命令
 

@@ -1,6 +1,6 @@
 ---
 name: codex-delivery-workflow
-description: 当用户要在当前项目初始化、启动、检查或推进 Codex 交付工作流时使用；支持项目级 .codex/agents、主管调度、PRD 老板确认、多 Agent 评审循环、SQLite 状态账本和产物归档。
+description: 当用户要在当前项目初始化、启动、检查或推进 Codex 交付工作流时使用；支持项目级 .codex/agents、主管准备 @ 子 Agent 交接、PRD 老板确认、多 Agent 评审循环、SQLite 状态账本和产物归档。
 ---
 
 # Codex 交付工作流
@@ -12,7 +12,7 @@ description: 当用户要在当前项目初始化、启动、检查或推进 Cod
 | 角色 | 责任 |
 | --- | --- |
 | 老板 | 用户。提出目标、确认 PRD、要求评审、直接点名主管或员工。 |
-| 主管 | `delivery-manager`。创建 run、派发员工、回收产物、归纳状态和下一步。 |
+| 主管 | `delivery-manager`。创建 run、准备 @ 员工交接指令、回收产物、归纳状态和下一步。 |
 | 员工 | `product-manager`、`ui-designer`、`frontend-impl`、`backend-impl`、`qa-tester`。处理各自待办。 |
 | 账本 | `.codex/delivery-workflow/workflow.sqlite3` 记录结构化状态；`docs/delivery/` 保存完整产物；`.codex/delivery-workflow/memory/` 保存各 Agent 记忆。 |
 
@@ -42,10 +42,13 @@ workflow.config.json
 
 1. 调用 `codex_delivery_workflow_init_project` 确认项目结构已就绪。
 2. 调用 `codex_delivery_workflow_create` 创建 run。
-3. 调用 `codex_delivery_workflow_dispatch_next` 领取 product-manager job。
-4. 派发或交给 `product-manager` 输出 PRD V1。
-5. 调用 `codex_delivery_workflow_complete_agent_step` 回填 PRD。
-6. 调用 `codex_delivery_workflow_manager_summary` 汇总给老板。
+3. 读取返回的 `next_handoff`；必要时也可以调用 `codex_delivery_workflow_prepare_handoff` 重新生成交接指令。
+4. 把交接指令原样归纳给老板或当前会话，明确下一步应由 `@product-manager` 执行。
+5. `product-manager` 被 @ 后，调用 `codex_delivery_workflow_dispatch_next` 并传 `agent="product-manager"` 领取自己的 pending job。
+6. `product-manager` 输出 PRD V1 后，调用 `codex_delivery_workflow_complete_agent_step` 回填 PRD。
+7. `delivery-manager` 调用 `codex_delivery_workflow_manager_summary` 汇总给老板。
+
+主管不要直接创建运行时 worker，也不要代替 product-manager 写 PRD；主管只负责创建 run、准备交接、等待回填后总结。
 
 PRD V1 完成后必须暂停，等待老板选择：
 
@@ -58,11 +61,13 @@ PRD V1 完成后必须暂停，等待老板选择：
 老板说“多角色评审一下”“多 Agent 评审一下”“输出 V2”时：
 
 1. 调用 `codex_delivery_workflow_request_prd_review`。
-2. 该工具会派发 `ui-designer`、`frontend-impl`、`backend-impl`、`qa-tester` 共同评审最新 PRD。
-3. 每个评审 Agent 完成后，调用 `codex_delivery_workflow_complete_agent_step` 回填评审意见。
-4. 最后一份评审意见回填后，工作流自动派发 `product-manager` 整合评审意见。
-5. `product-manager` 输出下一版完整 PRD。
-6. 再次调用 `codex_delivery_workflow_manager_summary` 给老板归纳 V2。
+2. 该工具会入队 `ui-designer`、`frontend-impl`、`backend-impl`、`qa-tester` 共同评审最新 PRD。
+3. 主管逐个调用 `codex_delivery_workflow_prepare_handoff`，输出 `@ui-designer`、`@frontend-impl`、`@backend-impl`、`@qa-tester` 的交接指令。
+4. 每个评审 Agent 被 @ 后，调用 `codex_delivery_workflow_dispatch_next` 领取自己的 job，完成后调用 `codex_delivery_workflow_complete_agent_step` 回填评审意见。
+5. 最后一份评审意见回填后，工作流自动入队 `product-manager` 整合评审意见。
+6. 主管再调用 `codex_delivery_workflow_prepare_handoff` 输出 `@product-manager` 交接指令。
+7. `product-manager` 输出下一版完整 PRD。
+8. 再次调用 `codex_delivery_workflow_manager_summary` 给老板归纳 V2。
 
 如果老板认为 V2 仍不满意，可以继续重复评审循环，输出 V3/V4。
 
@@ -83,7 +88,7 @@ ui-designer
 -> qa-tester
 ```
 
-每个员工完成后都必须回填结果。`qa-tester` 完成后，主管再汇总最终产物、测试结论、风险和后续建议。
+每个员工被 @ 后都必须先领取自己的 pending job，完成后回填结果。`qa-tester` 完成后，主管再汇总最终产物、测试结论、风险和后续建议。
 
 ## 员工被直接 @ 时
 
@@ -93,7 +98,7 @@ ui-designer
 2. 读取自己的 `.codex/delivery-workflow/memory/<agent>.md`。
 3. 如果存在属于自己的 pending job，调用 `codex_delivery_workflow_dispatch_next` 并传 `agent=<自己的名字>`。
 4. 完成后调用 `codex_delivery_workflow_complete_agent_step` 回填。
-5. 如果没有 pending job，不要私自改状态；说明当前账本状态，并建议由 `@delivery-manager` 派发。
+5. 如果没有 pending job，不要私自改状态；说明当前账本状态，并建议由 `@delivery-manager` 创建任务或准备交接。
 
 ## 工具表
 
@@ -102,6 +107,7 @@ ui-designer
 | 初始化项目 | `codex_delivery_workflow_init_project` |
 | 创建大任务 | `codex_delivery_workflow_create` |
 | 查询状态 | `codex_delivery_workflow_status` |
+| 准备 @ 交接 | `codex_delivery_workflow_prepare_handoff` |
 | 领取待办 | `codex_delivery_workflow_dispatch_next` |
 | 回填产物 | `codex_delivery_workflow_complete_agent_step` |
 | 主管汇总 | `codex_delivery_workflow_manager_summary` |
@@ -118,7 +124,7 @@ ui-designer
 - 当前 run 状态。
 - 当前 PRD 版本和评审轮次。
 - 已完成产物和路径。
-- 正在运行或待派发的 Agent。
+- 正在运行或待交接的 Agent。
 - 阻塞点。
 - 需要老板确认的下一步。
 

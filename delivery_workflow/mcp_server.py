@@ -15,6 +15,7 @@ from .engine import (
     inspect_workflow,
     list_artifacts,
     manager_summary,
+    prepare_agent_handoff,
     read_artifact,
     request_prd_review,
     status,
@@ -34,7 +35,7 @@ TOOLS = [
     },
     {
         "name": "codex_delivery_workflow_create",
-        "description": "创建一次 Codex 交付工作流运行，并入队第一个 runtime 子 Agent 步骤。",
+        "description": "创建一次 Codex 交付工作流运行，并准备第一个 @ 子 Agent 交接指令。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -53,13 +54,18 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}},
     },
     {
+        "name": "codex_delivery_workflow_prepare_handoff",
+        "description": "主管 Agent 使用：为下一个 pending job 生成 @ 子 Agent 交接指令，但不领取任务、不修改 running 状态。",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "agent": {"type": "string"}}},
+    },
+    {
         "name": "codex_delivery_workflow_dispatch_next",
-        "description": "领取下一个待派发步骤，返回给 Codex runtime spawn_agent 使用的子 Agent 任务消息。",
+        "description": "被 @ 的项目级子 Agent 使用：领取自己的 pending job，返回 task_message 和输出契约。",
         "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "agent": {"type": "string"}}},
     },
     {
         "name": "codex_delivery_workflow_complete_agent_step",
-        "description": "把 runtime 子 Agent 的最终输出写回工作流产物，并推进到下一步骤。",
+        "description": "把项目级子 Agent 的最终输出写回工作流产物，并推进到下一步骤。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -84,7 +90,7 @@ TOOLS = [
     },
     {
         "name": "codex_delivery_workflow_request_prd_review",
-        "description": "老板要求多 Agent 评审最新 PRD 时调用；会派发 UI、前端、后端、QA 评审并自动让产品 Agent 整合下一版。",
+        "description": "老板要求多 Agent 评审最新 PRD 时调用；会入队 UI、前端、后端、QA 评审，待各 @ Agent 领取后自动入队产品 Agent 整合下一版。",
         "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "note": {"type": "string"}}},
     },
     {
@@ -155,6 +161,8 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
         )
     if name == "codex_delivery_workflow_status":
         return status(args["run_id"]) if args.get("run_id") else current_project_status()
+    if name == "codex_delivery_workflow_prepare_handoff":
+        return prepare_agent_handoff(run_id=args.get("run_id"), agent=args.get("agent"))
     if name == "codex_delivery_workflow_dispatch_next":
         return dispatch_next_agent_task(run_id=args.get("run_id"), agent=args.get("agent"))
     if name == "codex_delivery_workflow_complete_agent_step":

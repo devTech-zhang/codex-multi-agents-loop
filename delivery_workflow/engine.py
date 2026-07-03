@@ -111,6 +111,7 @@ def create_project(
         "config_path": str(Path.cwd() / WORKSPACE_CONFIG_NAME),
         "execution_policy": _execution_policy(config),
     }
+    result["next_handoff"] = prepare_agent_handoff(run_id=run_id, agent=start_step)
     log_workflow("project.create.completed", "Codex 交付工作流项目已创建。", run_id=run_id, project_id=project_id, payload=result)
     return result
 
@@ -195,8 +196,97 @@ def enqueue_dynamic_step(run_id: str, step: dict[str, Any], payload: dict[str, A
     return {"id": job_id, "run_id": run_id, "step_id": step["id"], "status": "pending"}
 
 
+def prepare_agent_handoff(run_id: str | None = None, agent: str | None = None) -> dict[str, Any]:
+    _ensure_workspace_files()
+    job = _next_pending_job(run_id=run_id, agent=agent)
+    if job is None:
+        return {"ok": True, "idle": True}
+
+    run = get_run(job["run_id"])
+    definition = load_workflow(run["workflow_id"])
+    payload = json.loads(job.get("payload_json") or "{}")
+    step = _step_for_job(run, job, payload)
+    prompt = _render_prompt(job["run_id"], definition, step)
+    package = _agent_task_package(job, step, prompt, dispatch_mode="native_agent_handoff")
+    profile = load_agent_profile(step.get("agent", "workflow"))
+    target_agent = step.get("agent", "agent")
+    result = {
+        "ok": True,
+        "idle": False,
+        "run_id": job["run_id"],
+        "job_id": job["id"],
+        "step_id": step["id"],
+        "agent": target_agent,
+        "mention": f"@{target_agent}",
+        "agent_type": profile.get("agent_type", "worker"),
+        "model": profile.get("model"),
+        "model_reasoning_effort": profile.get("model_reasoning_effort"),
+        "skills": profile.get("skills", []),
+        "nickname_candidates": profile.get("nickname_candidates", []),
+        "required_outputs": step.get("outputs", []),
+        "workflow_phase": step.get("kind") or step["id"],
+        "claim_tool": "codex_delivery_workflow_dispatch_next",
+        "complete_tool": "codex_delivery_workflow_complete_agent_step",
+        "task_package": package,
+        "handoff_message": _handoff_message(job, step, package),
+    }
+    emit_event(
+        job["run_id"],
+        "agent.handoff_ready",
+        f"已准备 @{target_agent} 的交接指令，等待原生项目 Agent 领取任务。",
+        {"job_id": job["id"], "step_id": step["id"], "agent": target_agent, "task_package": package["path"]},
+    )
+    return result
+
+
 def dispatch_next_agent_task(run_id: str | None = None, agent: str | None = None) -> dict[str, Any]:
     _ensure_workspace_files()
+    job = _next_pending_job(run_id=run_id, agent=agent)
+    if job is None:
+        return {"ok": True, "idle": True}
+
+    with connect() as conn:
+        ts = now_iso()
+        conn.execute(
+            "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?, updated_at = ? WHERE id = ?",
+            (ts, ts, job["id"]),
+        )
+
+    run = get_run(job["run_id"])
+    definition = load_workflow(run["workflow_id"])
+    payload = json.loads(job.get("payload_json") or "{}")
+    step = _step_for_job(run, job, payload)
+    _mark_step(job["run_id"], step, "running", {"job_id": job["id"], **payload})
+    prompt = _render_prompt(job["run_id"], definition, step)
+    package = _agent_task_package(job, step, prompt, dispatch_mode="native_agent_claim")
+    profile = load_agent_profile(step.get("agent", "workflow"))
+    model = profile.get("model")
+    reasoning_effort = profile.get("model_reasoning_effort")
+    result = {
+        "ok": True,
+        "idle": False,
+        "run_id": job["run_id"],
+        "job_id": job["id"],
+        "step_id": step["id"],
+        "agent": step.get("agent"),
+        "agent_type": profile.get("agent_type", "worker"),
+        "model": model,
+        "model_reasoning_effort": reasoning_effort,
+        "skills": profile.get("skills", []),
+        "nickname_candidates": profile.get("nickname_candidates", []),
+        "required_outputs": step.get("outputs", []),
+        "workflow_phase": step.get("kind") or step["id"],
+        "claim_mode": "native_project_agent",
+        "project_agent_hint": f"你应该是当前会话中被 @{step.get('agent')} 点名的原生项目 Agent；请按任务包执行并用 MCP 工具回填结果。",
+        "task_package": package,
+        "task_message": prompt,
+        "complete_tool": "codex_delivery_workflow_complete_agent_step",
+    }
+    emit_event(job["run_id"], "agent.job_claimed", f"@{step.get('agent')} 已领取任务：{step['id']}", {"job_id": job["id"], "step_id": step["id"], "agent": step.get("agent")})
+    return result
+
+
+def _next_pending_job(run_id: str | None = None, agent: str | None = None) -> dict[str, Any] | None:
     with connect() as conn:
         clauses = ["jobs.status = 'pending'", "workflow_runs.status NOT IN ('completed','failed')"]
         params: list[Any] = []
@@ -212,59 +302,8 @@ def dispatch_next_agent_task(run_id: str | None = None, agent: str | None = None
             """,
             params,
         ).fetchall()
-        row = _select_dispatch_row(rows, agent)
-        if row is None:
-            return {"ok": True, "idle": True}
-        job = dict(row)
-        ts = now_iso()
-        conn.execute(
-            "UPDATE jobs SET status = 'running', attempts = attempts + 1, started_at = ?, updated_at = ? WHERE id = ?",
-            (ts, ts, job["id"]),
-        )
-
-    run = get_run(job["run_id"])
-    definition = load_workflow(run["workflow_id"])
-    payload = json.loads(job.get("payload_json") or "{}")
-    step = _step_for_job(run, job, payload)
-    _mark_step(job["run_id"], step, "running", {"job_id": job["id"], **payload})
-    prompt = _render_prompt(job["run_id"], definition, step)
-    package = write_artifact(
-        job["run_id"],
-        f"{step['id']}_agent_task",
-        prompt,
-        category="agent-task",
-        created_by=step.get("agent", "agent"),
-        metadata={"agent": step.get("agent"), "job_id": job["id"], "step_id": step["id"], "dispatch_mode": "runtime_subagent"},
-    )
-    profile = load_agent_profile(step.get("agent", "workflow"))
-    result = {
-        "ok": True,
-        "idle": False,
-        "run_id": job["run_id"],
-        "job_id": job["id"],
-        "step_id": step["id"],
-        "agent": step.get("agent"),
-        "agent_type": profile.get("agent_type", "worker"),
-        "skills": profile.get("skills", []),
-        "nickname_candidates": profile.get("nickname_candidates", []),
-        "required_outputs": step.get("outputs", []),
-        "workflow_phase": step.get("kind") or step["id"],
-        "project_agent_hint": f"如果你是在当前会话中被 @{step.get('agent')} 直接点名，也应使用本任务包和 MCP 工具回填结果。",
-        "task_package": package,
-        "spawn_message": prompt,
-        "runtime": {
-            "spawn_agent": {
-                "agent_type": profile.get("agent_type", "worker"),
-                "fork_context": False,
-                "message": "使用 spawn_message 作为子 Agent 初始任务。子 Agent 完成后调用 complete_agent_step 回填结果。",
-            },
-            "wait_agent": "等待该子 Agent 完成并读取最终 Markdown 输出。",
-            "close_agent": "回填结果后关闭子 Agent，释放并发槽位。",
-            "complete_tool": "codex_delivery_workflow_complete_agent_step",
-        },
-    }
-    emit_event(job["run_id"], "agent.dispatch_requested", f"请求派发子 Agent：{step.get('agent')}", {"job_id": job["id"], "step_id": step["id"]})
-    return result
+    row = _select_dispatch_row(rows, agent)
+    return dict(row) if row is not None else None
 
 
 def _select_dispatch_row(rows: list[Any], agent: str | None) -> Any | None:
@@ -283,6 +322,58 @@ def _select_dispatch_row(rows: list[Any], agent: str | None) -> Any | None:
         if job.get("step_id") == agent:
             return row
     return None
+
+
+def _agent_task_package(job: dict[str, Any], step: dict[str, Any], prompt: str, *, dispatch_mode: str) -> dict[str, Any]:
+    existing = _latest_agent_task_package(job["run_id"], f"{step['id']}_agent_task", job["id"])
+    if existing:
+        return existing
+    return write_artifact(
+        job["run_id"],
+        f"{step['id']}_agent_task",
+        prompt,
+        category="agent-task",
+        created_by=step.get("agent", "agent"),
+        metadata={"agent": step.get("agent"), "job_id": job["id"], "step_id": step["id"], "dispatch_mode": dispatch_mode},
+    )
+
+
+def _latest_agent_task_package(run_id: str, name: str, job_id: str) -> dict[str, Any] | None:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM artifacts WHERE run_id = ? AND name = ? ORDER BY version DESC",
+            (run_id, name),
+        ).fetchall()
+    for row in rows:
+        item = dict(row)
+        metadata = json.loads(item.get("metadata_json") or "{}")
+        if metadata.get("job_id") == job_id:
+            return {"id": item["id"], "run_id": item["run_id"], "name": item["name"], "path": item["path"], "version": item["version"]}
+    return None
+
+
+def _handoff_message(job: dict[str, Any], step: dict[str, Any], package: dict[str, Any]) -> str:
+    agent = step.get("agent", "agent")
+    mention = f"@{agent}"
+    outputs = ", ".join(step.get("outputs", [])) or "当前步骤声明的输出"
+    return "\n".join(
+        [
+            f"请在当前 Codex 会话中交给 `{mention}` 执行：",
+            "",
+            f"{mention} 请领取并完成 Codex 交付工作流任务。",
+            f"- run_id: `{job['run_id']}`",
+            f"- job_id: `{job['id']}`",
+            f"- step_id: `{step['id']}`",
+            f"- 任务包: `{package['path']}`",
+            f"- 必须输出: {outputs}",
+            "",
+            "执行要求：",
+            f"1. 先调用 `codex_delivery_workflow_dispatch_next`，参数传 `run_id=\"{job['run_id']}\"`、`agent=\"{agent}\"`，领取自己的 pending job。",
+            "2. 按返回的 `task_message` 或任务包文件执行，不要改其他 Agent 的状态。",
+            "3. 完成后调用 `codex_delivery_workflow_complete_agent_step` 回填 Markdown 结果。",
+            "4. 回填后由 `@delivery-manager` 读取账本并归纳状态、产物和下一步。",
+        ]
+    )
 
 
 def manager_summary(run_id: str | None = None) -> dict[str, Any]:
@@ -372,7 +463,7 @@ def complete_agent_step(
             (json.dumps(completed, ensure_ascii=False), ts, ts, job_id),
         )
     event_type = transition.get("event_type") or "step.completed"
-    event_message = transition.get("message") or f"step {step['id']} completed by runtime subagent"
+    event_message = transition.get("message") or f"step {step['id']} completed by native project agent"
     emit_event(run_id, event_type, event_message, completed)
     return {"ok": True, **completed, "transition": transition}
 
@@ -427,7 +518,7 @@ def request_prd_review(run_id: str | None = None, note: str | None = None) -> di
     emit_event(
         run["id"],
         "prd.review_requested",
-        f"老板要求多 Agent 评审 PRD V{target_version}，已派发第 {round_no} 轮评审。",
+        f"老板要求多 Agent 评审 PRD V{target_version}，已入队第 {round_no} 轮评审，等待对应 @ Agent 领取。",
         {"prd_version": target_version, "review_round": round_no, "note": note or ""},
     )
     return {"ok": True, "run_id": run["id"], "prd_version": target_version, "review_round": round_no, "review_jobs": review_steps}
@@ -655,7 +746,7 @@ def _complete_step_transition(run_id: str, step: dict[str, Any], outputs: list[d
         return {
             "next_step": revision["id"],
             "event_type": "prd.review_completed",
-            "message": f"PRD V{step['target_prd_version']} 第 {step['review_round']} 轮评审已完成，已派发 product-manager 输出下一版 PRD。",
+            "message": f"PRD V{step['target_prd_version']} 第 {step['review_round']} 轮评审已完成，已入队 product-manager 整合下一版 PRD，等待 @product-manager 领取。",
         }
     next_step = _next_step(step)
     _move_to_next(run_id, next_step)
@@ -761,13 +852,13 @@ def _manager_next_action(run: dict[str, Any], pending_jobs: list[str], running_j
     if running_jobs:
         return f"等待运行中的 Agent 完成：{', '.join(running_jobs)}"
     if pending_jobs:
-        return f"继续派发待办 Agent：{', '.join(pending_jobs)}"
+        return f"准备交接待办 Agent：{', '.join(pending_jobs)}。先生成交接指令，再让对应 @ Agent 领取。"
     if run["status"] == "waiting_owner_review":
         version = run.get("prd_version", 0)
         return f"请老板确认 PRD V{version}，或要求多 Agent 评审后输出下一版。"
     if run["status"] == "completed":
         return "交付流程已完成，可以读取最终 QA 报告和主管总结。"
-    return "请根据当前状态决定创建任务、确认 PRD、发起评审或继续派发。"
+    return "请根据当前状态决定创建任务、确认 PRD、发起评审或准备 @ Agent 交接。"
 
 
 def _next_step(step: dict[str, Any]) -> str | None:
@@ -851,8 +942,8 @@ def _mark_step(run_id: str, step: dict[str, Any], status_value: str, payload: di
 
 def _execution_policy(config: dict[str, Any]) -> dict[str, Any]:
     return {
-        "mode": "runtime_subagent",
-        "rule": "默认由主 Codex Agent 调用 spawn_agent 执行子 Agent，MCP 负责状态和产物。",
+        "mode": "native_agent_handoff",
+        "rule": "主管只生成 @ 子 Agent 的交接指令；被点名的项目级原生 Agent 自行领取 pending job，MCP 负责状态和产物。",
     }
 
 
