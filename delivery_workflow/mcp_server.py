@@ -7,13 +7,16 @@ from typing import Any
 from . import __version__
 from .config import initialize_project_workspace
 from .engine import (
+    complete_agent_step,
+    confirm_prd,
     create_project,
     current_project_status,
+    dispatch_next_agent_task,
     inspect_workflow,
     list_artifacts,
+    manager_summary,
     read_artifact,
-    run_worker_once,
-    run_worker_until_blocked,
+    request_prd_review,
     status,
 )
 
@@ -21,12 +24,17 @@ from .engine import (
 TOOLS = [
     {
         "name": "codex_delivery_workflow_init",
-        "description": "初始化当前目录的 Codex 交付工作流运行环境。",
-        "inputSchema": {"type": "object", "properties": {"overwrite_config": {"type": "boolean"}}},
+        "description": "初始化当前项目的 Codex 交付工作流：写入 .codex/agents、SQLite 薄状态账本、memory 和产物目录。",
+        "inputSchema": {"type": "object", "properties": {"overwrite_config": {"type": "boolean"}, "overwrite_agents": {"type": "boolean"}}},
+    },
+    {
+        "name": "codex_delivery_workflow_init_project",
+        "description": "codex_delivery_workflow_init 的项目级别名，用于强调会把 Agent 加载到当前项目目录。",
+        "inputSchema": {"type": "object", "properties": {"overwrite_config": {"type": "boolean"}, "overwrite_agents": {"type": "boolean"}}},
     },
     {
         "name": "codex_delivery_workflow_create",
-        "description": "创建一次 Codex 交付工作流运行，并按配置派发五个子 Agent。",
+        "description": "创建一次 Codex 交付工作流运行，并入队第一个 runtime 子 Agent 步骤。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -45,20 +53,39 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}},
     },
     {
-        "name": "codex_delivery_workflow_worker_once",
-        "description": "推进一个待执行的 Codex 交付工作流任务。",
-        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}},
+        "name": "codex_delivery_workflow_dispatch_next",
+        "description": "领取下一个待派发步骤，返回给 Codex runtime spawn_agent 使用的子 Agent 任务消息。",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "agent": {"type": "string"}}},
     },
     {
-        "name": "codex_delivery_workflow_worker_until_idle",
-        "description": "连续推进待执行任务，直到空闲、失败、完成或达到最大任务数。",
+        "name": "codex_delivery_workflow_complete_agent_step",
+        "description": "把 runtime 子 Agent 的最终输出写回工作流产物，并推进到下一步骤。",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "run_id": {"type": "string"},
-                "max_jobs": {"type": "integer", "minimum": 1, "maximum": 100},
+                "job_id": {"type": "string"},
+                "output": {"type": ["string", "object"]},
+                "spawned_agent_id": {"type": "string"},
+                "metadata": {"type": "object"},
             },
+            "required": ["run_id", "job_id", "output"],
         },
+    },
+    {
+        "name": "codex_delivery_workflow_manager_summary",
+        "description": "主管 Agent 汇总当前大任务状态、待处理子任务、近期事件和已输出产物路径。",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}},
+    },
+    {
+        "name": "codex_delivery_workflow_confirm_prd",
+        "description": "老板确认当前最新 PRD 后调用；工作流将进入 UI、前端、后端、QA 后续交付链路。",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}},
+    },
+    {
+        "name": "codex_delivery_workflow_request_prd_review",
+        "description": "老板要求多 Agent 评审最新 PRD 时调用；会派发 UI、前端、后端、QA 评审并自动让产品 Agent 整合下一版。",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "note": {"type": "string"}}},
     },
     {
         "name": "codex_delivery_workflow_list_artifacts",
@@ -116,8 +143,8 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _call_tool(name: str, args: dict[str, Any]) -> Any:
-    if name == "codex_delivery_workflow_init":
-        return initialize_project_workspace(overwrite_config=bool(args.get("overwrite_config")))
+    if name in {"codex_delivery_workflow_init", "codex_delivery_workflow_init_project"}:
+        return initialize_project_workspace(overwrite_config=bool(args.get("overwrite_config")), overwrite_agents=bool(args.get("overwrite_agents")))
     if name == "codex_delivery_workflow_create":
         return create_project(
             requirement=args["requirement"],
@@ -128,10 +155,22 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
         )
     if name == "codex_delivery_workflow_status":
         return status(args["run_id"]) if args.get("run_id") else current_project_status()
-    if name == "codex_delivery_workflow_worker_once":
-        return run_worker_once(run_id=args.get("run_id"))
-    if name == "codex_delivery_workflow_worker_until_idle":
-        return run_worker_until_blocked(run_id=args.get("run_id"), max_jobs=int(args.get("max_jobs") or 20))
+    if name == "codex_delivery_workflow_dispatch_next":
+        return dispatch_next_agent_task(run_id=args.get("run_id"), agent=args.get("agent"))
+    if name == "codex_delivery_workflow_complete_agent_step":
+        return complete_agent_step(
+            run_id=args["run_id"],
+            job_id=args["job_id"],
+            output=args["output"],
+            spawned_agent_id=args.get("spawned_agent_id"),
+            metadata=args.get("metadata") or {},
+        )
+    if name == "codex_delivery_workflow_manager_summary":
+        return manager_summary(run_id=args.get("run_id"))
+    if name == "codex_delivery_workflow_confirm_prd":
+        return confirm_prd(run_id=args.get("run_id"))
+    if name == "codex_delivery_workflow_request_prd_review":
+        return request_prd_review(run_id=args.get("run_id"), note=args.get("note"))
     if name == "codex_delivery_workflow_list_artifacts":
         return list_artifacts(args["run_id"])
     if name == "codex_delivery_workflow_read_artifact":

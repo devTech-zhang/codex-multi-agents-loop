@@ -41,9 +41,9 @@ def _workflow_log_path() -> Path:
     try:
         from .config import load_config, storage_path
 
-        return storage_path(load_config(), "logs", ".codex-delivery-workflow/logs") / "workflow.log"
+        return storage_path(load_config(), "logs", ".codex/delivery-workflow/logs") / "workflow.log"
     except Exception:
-        return Path.cwd() / ".codex-delivery-workflow" / "logs" / "workflow.log"
+        return Path.cwd() / ".codex" / "delivery-workflow" / "logs" / "workflow.log"
 
 
 def _sanitize(value: Any) -> Any:

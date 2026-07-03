@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .paths import artifact_root, db_path, log_root, source_root
+from .paths import artifact_root, db_path, log_root, memory_root, source_root
 
 
 SCHEMA = """
@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
   workflow_id TEXT NOT NULL,
   current_step TEXT NOT NULL,
   status TEXT NOT NULL,
+  prd_version INTEGER DEFAULT 0,
+  review_round INTEGER DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -97,8 +99,31 @@ CREATE TABLE IF NOT EXISTS events (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS workflow_reviews (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  target_artifact_id TEXT,
+  round INTEGER NOT NULL,
+  reviewer_agent TEXT NOT NULL,
+  opinion_path TEXT,
+  summary TEXT,
+  severity TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_memory (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  memory_path TEXT NOT NULL,
+  last_summary TEXT,
+  updated_at TEXT NOT NULL,
+  UNIQUE(run_id, agent_name)
+);
+
 CREATE INDEX IF NOT EXISTS idx_jobs_pending ON jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_artifacts_run_name ON artifacts(run_id, name, version);
+CREATE INDEX IF NOT EXISTS idx_reviews_run_round ON workflow_reviews(run_id, round);
 """
 
 
@@ -116,6 +141,7 @@ def init_db() -> Path:
     artifact_root().mkdir(parents=True, exist_ok=True)
     source_root().mkdir(parents=True, exist_ok=True)
     log_root().mkdir(parents=True, exist_ok=True)
+    memory_root().mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
         conn.execute("PRAGMA journal_mode=WAL")
@@ -129,7 +155,15 @@ def init_db() -> Path:
 
 
 def _migrate_schema(conn: sqlite3.Connection) -> None:
-    return None
+    _add_column(conn, "workflow_runs", "prd_version", "INTEGER DEFAULT 0")
+    _add_column(conn, "workflow_runs", "review_round", "INTEGER DEFAULT 0")
+
+
+def _add_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if column in {row[1] for row in rows}:
+        return
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 @contextmanager

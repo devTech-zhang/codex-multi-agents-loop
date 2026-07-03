@@ -16,6 +16,6 @@ def doctor() -> dict[str, Any]:
         "execution": {
             "ok": bool(codex),
             "codex_binary": codex,
-            "note": "当 code_platforms.enable_agent_cli 为 false 时，工作流只写入任务包和预备产物，不启动 Codex CLI。",
+            "note": "真实子 Agent 执行依赖 Codex runtime 的 spawn_agent；MCP 只负责状态流转和产物归档。",
         },
     }

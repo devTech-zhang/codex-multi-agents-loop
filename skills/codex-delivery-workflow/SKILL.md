@@ -1,73 +1,126 @@
 ---
 name: codex-delivery-workflow
-description: 当用户要启动、检查或推进 Codex 交付工作流时使用；该工作流会按顺序派发 product-manager、ui-designer、frontend-impl、backend-impl 和 qa-tester 五个子 Agent。
+description: 当用户要在当前项目初始化、启动、检查或推进 Codex 交付工作流时使用；支持项目级 .codex/agents、主管调度、PRD 老板确认、多 Agent 评审循环、SQLite 状态账本和产物归档。
 ---
 
 # Codex 交付工作流
 
-`codex-delivery-workflow` 是轻量交付工作流入口。它只负责状态流转、任务入队、产物归档和子 Agent 派发，不承担审批、外部通知或复杂发布流程。
+`codex-delivery-workflow` 是当前项目的多 Agent 交付入口。你是主管时，必须把状态、产物路径和下一步决策落到 MCP/SQLite，不要只靠聊天上下文推进。SQLite 是薄状态账本，只保存结构化状态、版本、路径和短摘要；完整需求和产物正文保存在 `docs/delivery/` 文件中。
 
-## 使用场景
+## 角色
 
-当用户提出以下意图时使用本 skill：
-
-- 初始化当前项目目录的工作流环境。
-- 基于一段需求创建一次交付工作流运行。
-- 查询 run、step、job、event 或 artifact 状态。
-- 推进一个或多个待执行 job。
-- 读取子 Agent 任务包和输出产物。
-
-## 核心规则
-
-| 规则 | 要求 |
+| 角色 | 责任 |
 | --- | --- |
-| 工作流定义 | 读取 `workflow/codex-delivery-workflow.toml` |
-| 子 Agent 定义 | 读取 `agents/*.toml` |
-| 运行状态 | SQLite 和日志写入 `.codex-delivery-workflow/` |
-| 产物目录 | 输出写入 `delivery-artifacts/` |
-| 工作目录 | 需要落代码时使用 `delivery-workspace/` |
-| 平台边界 | 只面向 Codex |
-| 当前范围 | 不做审批、外部通知、质量门禁循环或跨平台适配 |
+| 老板 | 用户。提出目标、确认 PRD、要求评审、直接点名主管或员工。 |
+| 主管 | `delivery-manager`。创建 run、派发员工、回收产物、归纳状态和下一步。 |
+| 员工 | `product-manager`、`ui-designer`、`frontend-impl`、`backend-impl`、`qa-tester`。处理各自待办。 |
+| 账本 | `.codex/delivery-workflow/workflow.sqlite3` 记录结构化状态；`docs/delivery/` 保存完整产物；`.codex/delivery-workflow/memory/` 保存各 Agent 记忆。 |
 
-## Agent 链路
+## 初始化
+
+老板在新项目或已有项目中启用工作流时，先调用：
 
 ```text
-product-manager
--> ui-designer
+codex_delivery_workflow_init_project
+```
+
+该工具会写入：
+
+```text
+.codex/agents/
+.codex/delivery-workflow/workflow.sqlite3
+.codex/delivery-workflow/memory/
+docs/delivery/
+workflow.config.json
+```
+
+初始化后，老板可以在当前项目中通过 `@delivery-manager` 或 `@product-manager` 等方式直接点名角色。如果当前会话的 `@` 菜单没有刷新，提示老板新开或刷新当前 Codex 会话。
+
+## 新需求主流程
+
+老板说“实现一个 xxx 需求”或“创建一个 xxx 新项目”时：
+
+1. 调用 `codex_delivery_workflow_init_project` 确认项目结构已就绪。
+2. 调用 `codex_delivery_workflow_create` 创建 run。
+3. 调用 `codex_delivery_workflow_dispatch_next` 领取 product-manager job。
+4. 派发或交给 `product-manager` 输出 PRD V1。
+5. 调用 `codex_delivery_workflow_complete_agent_step` 回填 PRD。
+6. 调用 `codex_delivery_workflow_manager_summary` 汇总给老板。
+
+PRD V1 完成后必须暂停，等待老板选择：
+
+- 老板确认：调用 `codex_delivery_workflow_confirm_prd`。
+- 老板要求多 Agent 评审：调用 `codex_delivery_workflow_request_prd_review`。
+- 老板要求产品 Agent 单独补充：让 `product-manager` 按老板意见处理，并继续回填。
+
+## 多 Agent 评审循环
+
+老板说“多角色评审一下”“多 Agent 评审一下”“输出 V2”时：
+
+1. 调用 `codex_delivery_workflow_request_prd_review`。
+2. 该工具会派发 `ui-designer`、`frontend-impl`、`backend-impl`、`qa-tester` 共同评审最新 PRD。
+3. 每个评审 Agent 完成后，调用 `codex_delivery_workflow_complete_agent_step` 回填评审意见。
+4. 最后一份评审意见回填后，工作流自动派发 `product-manager` 整合评审意见。
+5. `product-manager` 输出下一版完整 PRD。
+6. 再次调用 `codex_delivery_workflow_manager_summary` 给老板归纳 V2。
+
+如果老板认为 V2 仍不满意，可以继续重复评审循环，输出 V3/V4。
+
+## PRD 确认后
+
+老板确认最新 PRD 后，调用：
+
+```text
+codex_delivery_workflow_confirm_prd
+```
+
+后续链路保持顺序推进：
+
+```text
+ui-designer
 -> frontend-impl
 -> backend-impl
 -> qa-tester
 ```
 
-子 Agent 不直接相互调用，也不自行推进状态。每个步骤只读取工作流声明的输入产物，只输出工作流声明的结果产物。
+每个员工完成后都必须回填结果。`qa-tester` 完成后，主管再汇总最终产物、测试结论、风险和后续建议。
 
-## MCP 工具
+## 员工被直接 @ 时
 
-优先使用 MCP 工具，CLI 只作为排障兜底。
+员工 Agent 被老板直接点名时必须遵守：
 
-| 意图 | MCP 工具 | CLI 兜底 |
-| --- | --- | --- |
-| 初始化 | `codex_delivery_workflow_init` | `python3 -m delivery_workflow.cli config init` |
-| 创建运行 | `codex_delivery_workflow_create` | `python3 -m delivery_workflow.cli project create --title ... --requirement ...` |
-| 查询状态 | `codex_delivery_workflow_status` | `python3 -m delivery_workflow.cli project status` |
-| 推进一次 | `codex_delivery_workflow_worker_once` | `python3 -m delivery_workflow.cli worker once --run-id <run_id>` |
-| 推进到空闲 | `codex_delivery_workflow_worker_until_idle` | `python3 -m delivery_workflow.cli worker until-idle --run-id <run_id>` |
-| 列出产物 | `codex_delivery_workflow_list_artifacts` | `python3 -m delivery_workflow.cli artifact list --run-id <run_id>` |
-| 读取产物 | `codex_delivery_workflow_read_artifact` | `python3 -m delivery_workflow.cli artifact read --run-id <run_id> --name <name>` |
-| 查看定义 | `codex_delivery_workflow_inspect` | `python3 -m delivery_workflow.cli workflow inspect` |
+1. 先读取 `codex_delivery_workflow_manager_summary`；需要完整明细时再读取 `codex_delivery_workflow_status` 或具体产物。
+2. 读取自己的 `.codex/delivery-workflow/memory/<agent>.md`。
+3. 如果存在属于自己的 pending job，调用 `codex_delivery_workflow_dispatch_next` 并传 `agent=<自己的名字>`。
+4. 完成后调用 `codex_delivery_workflow_complete_agent_step` 回填。
+5. 如果没有 pending job，不要私自改状态；说明当前账本状态，并建议由 `@delivery-manager` 派发。
 
-## 执行模式
+## 工具表
 
-`code_platforms.enable_agent_cli=false` 是默认验证模式。此时工作流只写任务包和预备产物，不启动 Codex CLI。
+| 意图 | MCP 工具 |
+| --- | --- |
+| 初始化项目 | `codex_delivery_workflow_init_project` |
+| 创建大任务 | `codex_delivery_workflow_create` |
+| 查询状态 | `codex_delivery_workflow_status` |
+| 领取待办 | `codex_delivery_workflow_dispatch_next` |
+| 回填产物 | `codex_delivery_workflow_complete_agent_step` |
+| 主管汇总 | `codex_delivery_workflow_manager_summary` |
+| 确认 PRD | `codex_delivery_workflow_confirm_prd` |
+| 发起 PRD 评审 | `codex_delivery_workflow_request_prd_review` |
+| 列出产物 | `codex_delivery_workflow_list_artifacts` |
+| 读取产物 | `codex_delivery_workflow_read_artifact` |
+| 查看定义 | `codex_delivery_workflow_inspect` |
 
-`code_platforms.enable_agent_cli=true` 会让每个 agent step 调用 Codex CLI 执行生成的任务包。建议先完成状态流转 smoke test，再打开真实执行。
+## 输出要求
 
-## 验证
+主管每次回复老板时，必须用中文说明：
 
-修改工作流、子 Agent、运行时代码或 skill 文档后，至少运行：
+- 当前 run 状态。
+- 当前 PRD 版本和评审轮次。
+- 已完成产物和路径。
+- 正在运行或待派发的 Agent。
+- 阻塞点。
+- 需要老板确认的下一步。
 
-```bash
-python3 -m unittest tests.test_core
-python3 -m compileall delivery_workflow
-git diff --check
-```
+不要输出空泛流程说明。老板问状态时，先读账本，再总结。
+不要把完整 PRD、设计稿、实现报告或测试报告粘进状态回复；只输出版本、路径、短摘要、阻塞点和下一步，需要正文时再读取对应产物。

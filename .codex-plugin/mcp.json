@@ -4,7 +4,7 @@
             "command": "bash",
             "args": [
                 "-lc",
-                "root=\"${CODEX_PLUGIN_ROOT:-$(pwd)}\"; exec \"$root/scripts/codex-deliveryflow-mcp\""
+                "root=\"$CODEX_PLUGIN_ROOT\"; if [ -z \"$root\" ]; then root=\"$(pwd)\"; fi; exec \"$root/scripts/codex-deliveryflow-mcp\""
             ]
         }
     }

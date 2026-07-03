@@ -4,14 +4,13 @@ version = "0.1.0"
 
 [[steps]]
 id = "product-manager"
-name = "产品需求整理"
+name = "产品需求整理 V1"
 category = "automated"
 executor = "agent"
 agent = "product-manager"
 artifact_category = "product"
 inputs = ["raw_requirement", "project_context"]
 outputs = ["prd"]
-next = { default = "ui-designer" }
 
 [[steps]]
 id = "ui-designer"

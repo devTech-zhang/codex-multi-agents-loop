@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import time
 from typing import Any
 
 from .capabilities import doctor
@@ -15,8 +14,6 @@ from .engine import (
     list_artifacts,
     list_jobs,
     read_artifact,
-    run_worker_once,
-    run_worker_until_blocked,
     status,
     workflows,
     write_artifact,
@@ -79,17 +76,6 @@ def main(argv: list[str] | None = None) -> int:
     jobs_list.add_argument("--run-id")
     jobs_list.add_argument("--status")
     jobs_list.add_argument("--limit", type=int, default=50)
-
-    worker = sub.add_parser("worker")
-    worker_sub = worker.add_subparsers(dest="worker_command")
-    once = worker_sub.add_parser("once")
-    once.add_argument("--run-id")
-    until_idle = worker_sub.add_parser("until-idle")
-    until_idle.add_argument("--run-id")
-    until_idle.add_argument("--max-jobs", type=int, default=20)
-    start = worker_sub.add_parser("start")
-    start.add_argument("--interval", type=float, default=5.0)
-    start.add_argument("--max-iterations", type=int)
 
     args = parser.parse_args(argv)
     try:
@@ -156,20 +142,6 @@ def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.command == "job" and args.job_command == "list":
         print_json({"ok": True, "jobs": list_jobs(args.run_id, args.status, args.limit)})
         return 0
-    if args.command == "worker":
-        if args.worker_command == "once":
-            print_json(run_worker_once(run_id=args.run_id))
-            return 0
-        if args.worker_command == "until-idle":
-            print_json(run_worker_until_blocked(run_id=args.run_id, max_jobs=args.max_jobs))
-            return 0
-        if args.worker_command == "start":
-            iterations = 0
-            while args.max_iterations is None or iterations < args.max_iterations:
-                iterations += 1
-                print_json(run_worker_once())
-                time.sleep(max(args.interval, 1.0))
-            return 0
     parser.print_help()
     return 2
 

@@ -2,14 +2,20 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from pathlib import Path
 from typing import Any
 
-from .config import WORKSPACE_CONFIG_NAME, code_platform_for_step, load_config, write_workspace_config
+from .config import (
+    MANAGER_AGENT_ID,
+    PROJECT_AGENT_IDS,
+    WORKSPACE_CONFIG_NAME,
+    initialize_agent_memory_files,
+    load_config,
+    materialize_project_agents,
+    write_workspace_config,
+)
 from .definitions import WorkflowDefinition, list_workflows, load_agent_profile, load_workflow
-from .paths import DEFAULT_WORKFLOW_ID, artifact_root, source_root
-from .platforms import build_agent_command, execution_needs_permission, maybe_run_command, select_dev_executor
+from .paths import DEFAULT_WORKFLOW_ID, artifact_root, memory_root, source_root
 from .storage import connect, new_id, now_iso, row_dict, row_dicts
 from .workflow_log import log_workflow
 
@@ -26,19 +32,14 @@ def create_project(
     owner_id: str | None = None,
     source: str = "codex",
     workflow_id: str = DEFAULT_WORKFLOW_ID,
-    auto_start: bool | None = None,
-    auto_run_to_gate: bool | None = None,
     business_goal: str | None = None,
     requires_frontend: bool = True,
     requires_backend: bool = True,
 ) -> dict[str, Any]:
     _ensure_workspace_files()
+    materialize_project_agents(overwrite=False)
+    initialize_agent_memory_files(overwrite=False)
     config = load_config()
-    workflow_config = config.get("workflow") or {}
-    if auto_start is None:
-        auto_start = bool(workflow_config.get("auto_start", True))
-    if auto_run_to_gate is None:
-        auto_run_to_gate = bool(workflow_config.get("auto_run_to_idle", True))
     requirement = requirement.strip()
     if not requirement:
         raise WorkflowError("requirement cannot be empty")
@@ -49,7 +50,8 @@ def create_project(
     project_id = _new_project_id(project_title)
     run_id = new_id("run")
     start_step = definition.first_step_id
-    platform = code_platform_for_step(config, fallback=platform)
+    platform = "codex"
+    requirement_pointer = _requirement_pointer(requirement)
 
     with connect() as conn:
         conn.execute(
@@ -57,15 +59,16 @@ def create_project(
             INSERT INTO projects(id,title,requirement,platform,source,owner_id,status,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?,?,?)
             """,
-            (project_id, project_title, requirement, platform, source, owner_id, "created", ts, ts),
+            (project_id, project_title, requirement_pointer, platform, source, owner_id, "created", ts, ts),
         )
         conn.execute(
             """
-            INSERT INTO workflow_runs(id,project_id,workflow_id,current_step,status,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?)
+            INSERT INTO workflow_runs(id,project_id,workflow_id,current_step,status,prd_version,review_round,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
             """,
-            (run_id, project_id, workflow_id, start_step, "running", ts, ts),
+            (run_id, project_id, workflow_id, start_step, "prd_draft", 0, 0, ts, ts),
         )
+    _initialize_run_memories(run_id)
 
     write_artifact(run_id, "raw_requirement", requirement, category="raw", created_by="workflow")
     write_artifact(
@@ -76,7 +79,6 @@ def create_project(
                 "project_id": project_id,
                 "run_id": run_id,
                 "platform": platform,
-                "dev_executor": select_dev_executor(platform),
                 "workflow_id": workflow_id,
                 "business_goal": business_goal or "",
                 "requires_frontend": requires_frontend,
@@ -84,6 +86,9 @@ def create_project(
                 "project_root": str(Path.cwd()),
                 "artifact_root": str(artifact_root()),
                 "source_root": str(source_root()),
+                "agent_dir": str(Path.cwd() / ".codex" / "agents"),
+                "memory_root": str(memory_root()),
+                "workflow_state": "PRD V1 完成后会暂停，等待老板确认或发起多 Agent 评审。",
             },
             ensure_ascii=False,
             indent=2,
@@ -91,14 +96,9 @@ def create_project(
         category="context",
         created_by="workflow",
     )
-    emit_event(run_id, "workflow.started", "Codex 交付工作流已启动。", {"project_id": project_id, "start_step": start_step})
+    emit_event(run_id, "workflow.started", "Codex 交付工作流已启动，等待 product-manager 输出 PRD V1。", {"project_id": project_id, "start_step": start_step})
 
-    if auto_start:
-        enqueue_step(run_id, start_step)
-
-    auto_run_result = None
-    if auto_start and auto_run_to_gate:
-        auto_run_result = run_worker_until_blocked(run_id=run_id, max_jobs=int(workflow_config.get("max_auto_jobs") or 20))
+    enqueue_step(run_id, start_step)
 
     result = {
         "project_id": project_id,
@@ -106,11 +106,11 @@ def create_project(
         "workflow_id": workflow_id,
         "artifact_dir": str(artifact_root()),
         "source_dir": str(source_root()),
+        "agent_dir": str(Path.cwd() / ".codex" / "agents"),
+        "memory_dir": str(memory_root()),
         "config_path": str(Path.cwd() / WORKSPACE_CONFIG_NAME),
         "execution_policy": _execution_policy(config),
     }
-    if auto_run_result is not None:
-        result["auto_run"] = auto_run_result
     log_workflow("project.create.completed", "Codex 交付工作流项目已创建。", run_id=run_id, project_id=project_id, payload=result)
     return result
 
@@ -170,28 +170,50 @@ def enqueue_step(run_id: str, step_id: str, payload: dict[str, Any] | None = Non
     return {"id": job_id, "run_id": run_id, "step_id": step_id, "status": "pending"}
 
 
-def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
+def enqueue_dynamic_step(run_id: str, step: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    run = get_run(run_id)
+    if run["status"] in {"completed", "failed"}:
+        raise WorkflowError(f"cannot enqueue {step['id']}: workflow run {run_id} is {run['status']}")
+    payload = {**(payload or {}), "step": step}
+    job_id = new_id("job")
+    ts = now_iso()
     with connect() as conn:
+        existing = conn.execute(
+            "SELECT * FROM jobs WHERE run_id = ? AND step_id = ? AND status IN ('pending','running')",
+            (run_id, step["id"]),
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        conn.execute(
+            """
+            INSERT INTO jobs(id,run_id,step_id,job_type,status,payload_json,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (job_id, run_id, step["id"], step["executor"], "pending", json.dumps(payload, ensure_ascii=False), ts, ts),
+        )
+    emit_event(run_id, "job.enqueued", f"dynamic step {step['id']} enqueued", {"job_id": job_id, "step": step})
+    return {"id": job_id, "run_id": run_id, "step_id": step["id"], "status": "pending"}
+
+
+def dispatch_next_agent_task(run_id: str | None = None, agent: str | None = None) -> dict[str, Any]:
+    _ensure_workspace_files()
+    with connect() as conn:
+        clauses = ["jobs.status = 'pending'", "workflow_runs.status NOT IN ('completed','failed')"]
+        params: list[Any] = []
         if run_id:
-            row = conn.execute(
-                """
-                SELECT jobs.* FROM jobs
-                JOIN workflow_runs ON workflow_runs.id = jobs.run_id
-                WHERE jobs.status = 'pending' AND jobs.run_id = ? AND workflow_runs.status NOT IN ('completed','failed')
-                ORDER BY jobs.created_at LIMIT 1
-                """,
-                (run_id,),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                """
-                SELECT jobs.* FROM jobs
-                JOIN workflow_runs ON workflow_runs.id = jobs.run_id
-                WHERE jobs.status = 'pending' AND workflow_runs.status NOT IN ('completed','failed')
-                ORDER BY jobs.created_at LIMIT 1
-                """
-            ).fetchone()
-        if not row:
+            clauses.append("jobs.run_id = ?")
+            params.append(run_id)
+        rows = conn.execute(
+            f"""
+            SELECT jobs.* FROM jobs
+            JOIN workflow_runs ON workflow_runs.id = jobs.run_id
+            WHERE {" AND ".join(clauses)}
+            ORDER BY jobs.created_at
+            """,
+            params,
+        ).fetchall()
+        row = _select_dispatch_row(rows, agent)
+        if row is None:
             return {"ok": True, "idle": True}
         job = dict(row)
         ts = now_iso()
@@ -200,91 +222,159 @@ def run_worker_once(run_id: str | None = None) -> dict[str, Any]:
             (ts, ts, job["id"]),
         )
 
-    try:
-        result = execute_step(job["run_id"], job["step_id"], json.loads(job.get("payload_json") or "{}"))
-        with connect() as conn:
-            ts = now_iso()
-            conn.execute(
-                "UPDATE jobs SET status = 'done', result_json = ?, finished_at = ?, updated_at = ? WHERE id = ?",
-                (json.dumps(result, ensure_ascii=False), ts, ts, job["id"]),
-            )
-        return {"ok": True, "job_id": job["id"], "result": result}
-    except Exception as exc:
-        with connect() as conn:
-            ts = now_iso()
-            conn.execute(
-                "UPDATE jobs SET status = 'failed', error = ?, finished_at = ?, updated_at = ? WHERE id = ?",
-                (str(exc), ts, ts, job["id"]),
-            )
-        emit_event(job["run_id"], "job.failed", str(exc), {"job_id": job["id"], "step_id": job["step_id"]})
-        _mark_run_failed(job["run_id"])
-        return {"ok": False, "job_id": job["id"], "error": str(exc)}
+    run = get_run(job["run_id"])
+    definition = load_workflow(run["workflow_id"])
+    payload = json.loads(job.get("payload_json") or "{}")
+    step = _step_for_job(run, job, payload)
+    _mark_step(job["run_id"], step, "running", {"job_id": job["id"], **payload})
+    prompt = _render_prompt(job["run_id"], definition, step)
+    package = write_artifact(
+        job["run_id"],
+        f"{step['id']}_agent_task",
+        prompt,
+        category="agent-task",
+        created_by=step.get("agent", "agent"),
+        metadata={"agent": step.get("agent"), "job_id": job["id"], "step_id": step["id"], "dispatch_mode": "runtime_subagent"},
+    )
+    profile = load_agent_profile(step.get("agent", "workflow"))
+    result = {
+        "ok": True,
+        "idle": False,
+        "run_id": job["run_id"],
+        "job_id": job["id"],
+        "step_id": step["id"],
+        "agent": step.get("agent"),
+        "agent_type": profile.get("agent_type", "worker"),
+        "skills": profile.get("skills", []),
+        "nickname_candidates": profile.get("nickname_candidates", []),
+        "required_outputs": step.get("outputs", []),
+        "workflow_phase": step.get("kind") or step["id"],
+        "project_agent_hint": f"如果你是在当前会话中被 @{step.get('agent')} 直接点名，也应使用本任务包和 MCP 工具回填结果。",
+        "task_package": package,
+        "spawn_message": prompt,
+        "runtime": {
+            "spawn_agent": {
+                "agent_type": profile.get("agent_type", "worker"),
+                "fork_context": False,
+                "message": "使用 spawn_message 作为子 Agent 初始任务。子 Agent 完成后调用 complete_agent_step 回填结果。",
+            },
+            "wait_agent": "等待该子 Agent 完成并读取最终 Markdown 输出。",
+            "close_agent": "回填结果后关闭子 Agent，释放并发槽位。",
+            "complete_tool": "codex_delivery_workflow_complete_agent_step",
+        },
+    }
+    emit_event(job["run_id"], "agent.dispatch_requested", f"请求派发子 Agent：{step.get('agent')}", {"job_id": job["id"], "step_id": step["id"]})
+    return result
 
 
-def run_worker_until_blocked(
+def _select_dispatch_row(rows: list[Any], agent: str | None) -> Any | None:
+    if not rows:
+        return None
+    if not agent:
+        return rows[0]
+    for row in rows:
+        job = dict(row)
+        payload = json.loads(job.get("payload_json") or "{}")
+        step = payload.get("step")
+        if isinstance(step, dict):
+            if step.get("agent") == agent:
+                return row
+            continue
+        if job.get("step_id") == agent:
+            return row
+    return None
+
+
+def manager_summary(run_id: str | None = None) -> dict[str, Any]:
+    current = status(run_id) if run_id else current_project_status()
+    run = current["run"]
+    completed_steps = [step["step_id"] for step in current["step_runs"] if step.get("status") == "completed"]
+    running_jobs = [job["step_id"] for job in current["jobs"] if job.get("status") == "running"]
+    pending_jobs = [job["step_id"] for job in current["jobs"] if job.get("status") == "pending"]
+    artifacts = [
+        {
+            "name": artifact["name"],
+            "category": artifact["category"],
+            "created_by": artifact["created_by"],
+            "version": artifact["version"],
+            "path": artifact["path"],
+        }
+        for artifact in current["artifacts"]
+    ]
+    last_event = current["events"][0] if current["events"] else None
+    next_action = _manager_next_action(run, pending_jobs, running_jobs)
+    return {
+        "manager_agent": MANAGER_AGENT_ID,
+        "run_id": run["id"],
+        "run_status": run["status"],
+        "current_step": run["current_step"],
+        "prd_version": run.get("prd_version", 0),
+        "review_round": run.get("review_round", 0),
+        "completed_steps": completed_steps,
+        "running_jobs": running_jobs,
+        "pending_jobs": pending_jobs,
+        "artifacts": artifacts,
+        "reviews": current.get("reviews", []),
+        "agent_memories": current.get("agent_memory", []),
+        "next_action": next_action,
+        "last_update": last_event["message"] if last_event else "",
+        "last_event": last_event,
+    }
+
+
+def complete_agent_step(
     *,
-    run_id: str | None = None,
-    max_jobs: int = 50,
-    stop_steps: set[str] | None = None,
+    run_id: str,
+    job_id: str,
+    output: str | dict[str, Any],
+    spawned_agent_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    stop_steps = stop_steps or set()
-    results: list[dict[str, Any]] = []
-    for _ in range(max_jobs):
-        item = run_worker_once(run_id=run_id)
-        results.append(item)
-        if not item.get("ok"):
-            return {"ok": False, "stopped": "failed", "results": results}
-        if item.get("idle"):
-            return {"ok": True, "stopped": "idle", "results": results}
-        result = item.get("result") or {}
-        if result.get("step_id") in stop_steps:
-            return {"ok": True, "stopped": "stop_step", "results": results}
-    return {"ok": True, "stopped": "limit", "results": results}
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE id = ? AND run_id = ?", (job_id, run_id)).fetchone()
+    if not row:
+        raise WorkflowError(f"job not found: {job_id}")
+    job = dict(row)
+    if job["status"] != "running":
+        raise WorkflowError(f"job {job_id} must be running before completion, current status: {job['status']}")
 
-
-def execute_step(run_id: str, step_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload = payload or {}
     run = get_run(run_id)
     definition = load_workflow(run["workflow_id"])
-    step = definition.step(step_id)
-    _mark_step(run_id, step, "running", payload)
-    try:
-        if step["executor"] != "agent":
-            raise WorkflowError(f"unsupported slim workflow executor: {step['executor']}")
-        result = _run_agent_step(run, definition, step)
-        _mark_step(run_id, step, "completed", result)
-        next_step = _next_step(step)
-        _move_to_next(run_id, next_step)
-        if next_step:
-            enqueue_step(run_id, next_step)
-        completed = {"step_id": step_id, "status": "completed", "result": result, "next_step": next_step}
-        emit_event(run_id, "step.completed", f"step {step_id} completed", completed)
-        return completed
-    except Exception as exc:
-        _mark_step(run_id, step, "failed", {"error": str(exc)})
-        _mark_run_failed(run_id)
-        raise
-
-
-def watch_run(
-    run_id: str,
-    *,
-    timeout_seconds: float | None = None,
-    poll_interval_seconds: float | None = None,
-) -> dict[str, Any]:
-    config = load_config()
-    workflow = config.get("workflow") or {}
-    timeout = float(timeout_seconds if timeout_seconds is not None else workflow.get("watch_timeout_seconds") or 300)
-    interval = float(poll_interval_seconds if poll_interval_seconds is not None else workflow.get("watch_poll_interval_seconds") or 2.0)
-    deadline = time.monotonic() + max(timeout, 0.0)
-    while True:
-        current = status(run_id)
-        active_jobs = [job for job in current.get("jobs", []) if job.get("status") in {"pending", "running"}]
-        if current["run"]["status"] in {"completed", "failed"} or not active_jobs:
-            return {"ok": True, "run_id": run_id, "status": current}
-        if time.monotonic() >= deadline:
-            return {"ok": False, "run_id": run_id, "reason": "timeout", "status": current}
-        time.sleep(max(interval, 0.2))
+    payload = json.loads(job.get("payload_json") or "{}")
+    step = _step_for_job(run, job, payload)
+    output_map = _normalize_agent_output(output, step.get("outputs", []))
+    outputs = [
+        write_artifact(
+            run_id,
+            artifact_name,
+            content,
+            category=step.get("artifact_category", "agent"),
+            created_by=step.get("agent", "agent"),
+            metadata={"agent": step.get("agent"), "job_id": job_id, "spawned_agent_id": spawned_agent_id, **(metadata or {})},
+        )
+        for artifact_name, content in output_map.items()
+    ]
+    result = {
+        "agent": step.get("agent"),
+        "spawned_agent_id": spawned_agent_id,
+        "outputs": outputs,
+        "metadata": metadata or {},
+    }
+    _mark_step(run_id, step, "completed", result)
+    _update_agent_memory(run_id, step.get("agent", "agent"), output_map, outputs)
+    transition = _complete_step_transition(run_id, step, outputs, result, job_id=job_id)
+    next_step = transition.get("next_step")
+    completed = {"step_id": step["id"], "status": "completed", "result": result, "outputs": outputs, "next_step": next_step}
+    with connect() as conn:
+        ts = now_iso()
+        conn.execute(
+            "UPDATE jobs SET status = 'done', result_json = ?, finished_at = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(completed, ensure_ascii=False), ts, ts, job_id),
+        )
+    event_type = transition.get("event_type") or "step.completed"
+    event_message = transition.get("message") or f"step {step['id']} completed by runtime subagent"
+    emit_event(run_id, event_type, event_message, completed)
+    return {"ok": True, **completed, "transition": transition}
 
 
 def status(run_id: str) -> dict[str, Any]:
@@ -294,7 +384,53 @@ def status(run_id: str) -> dict[str, Any]:
         jobs = row_dicts(conn.execute("SELECT * FROM jobs WHERE run_id = ? ORDER BY created_at DESC LIMIT 20", (run_id,)).fetchall())
         artifacts = list_artifacts(run_id)
         events = row_dicts(conn.execute("SELECT * FROM events WHERE run_id = ? ORDER BY created_at DESC LIMIT 20", (run_id,)).fetchall())
-    return {"run": run, "step_runs": steps, "gates": [], "jobs": jobs, "artifacts": artifacts, "events": events}
+        reviews = row_dicts(conn.execute("SELECT * FROM workflow_reviews WHERE run_id = ? ORDER BY created_at", (run_id,)).fetchall())
+        memories = row_dicts(conn.execute("SELECT * FROM agent_memory WHERE run_id = ? ORDER BY agent_name", (run_id,)).fetchall())
+    return {
+        "run": run,
+        "step_runs": steps,
+        "gates": [],
+        "jobs": jobs,
+        "artifacts": artifacts,
+        "reviews": reviews,
+        "agent_memory": memories,
+        "events": events,
+    }
+
+
+def confirm_prd(run_id: str | None = None) -> dict[str, Any]:
+    run = get_run(run_id) if run_id else _latest_run_for_current_project()
+    latest_prd = read_artifact(run["id"], "prd")
+    if run["status"] not in {"waiting_owner_review", "prd_draft", "prd_revision"}:
+        raise WorkflowError(f"cannot confirm PRD while run status is {run['status']}")
+    _move_to_next(run["id"], "ui-designer", status_value="running")
+    enqueue_step(run["id"], "ui-designer", {"confirmed_prd_version": latest_prd["version"]})
+    emit_event(
+        run["id"],
+        "prd.confirmed",
+        f"老板已确认 PRD V{latest_prd['version']}，开始进入 UI/前后端/QA 交付链路。",
+        {"prd_version": latest_prd["version"], "prd_artifact": latest_prd["id"]},
+    )
+    return {"ok": True, "run_id": run["id"], "prd_version": latest_prd["version"], "next_step": "ui-designer"}
+
+
+def request_prd_review(run_id: str | None = None, note: str | None = None) -> dict[str, Any]:
+    run = get_run(run_id) if run_id else _latest_run_for_current_project()
+    latest_prd = read_artifact(run["id"], "prd")
+    round_no = int(run.get("review_round") or 0) + 1
+    target_version = int(latest_prd["version"])
+    review_steps = []
+    for reviewer in ["ui-designer", "frontend-impl", "backend-impl", "qa-tester"]:
+        step = _prd_review_step(reviewer=reviewer, prd_version=target_version, round_no=round_no)
+        review_steps.append(enqueue_dynamic_step(run["id"], step, {"owner_note": note or "", "target_prd_version": target_version, "review_round": round_no}))
+    _set_run_state(run["id"], status_value="reviewing", current_step=f"prd-v{target_version}-review-r{round_no}", review_round=round_no)
+    emit_event(
+        run["id"],
+        "prd.review_requested",
+        f"老板要求多 Agent 评审 PRD V{target_version}，已派发第 {round_no} 轮评审。",
+        {"prd_version": target_version, "review_round": round_no, "note": note or ""},
+    )
+    return {"ok": True, "run_id": run["id"], "prd_version": target_version, "review_round": round_no, "review_jobs": review_steps}
 
 
 def write_artifact(
@@ -309,7 +445,7 @@ def write_artifact(
     with connect() as conn:
         previous = conn.execute("SELECT MAX(version) AS version FROM artifacts WHERE run_id = ? AND name = ?", (run_id, name)).fetchone()
         version = int(previous["version"] or 0) + 1
-    path = artifact_root() / _path_segment(created_by) / category / f"v{version}" / _artifact_filename(name, content)
+    path = artifact_root() / _path_segment(run_id) / _path_segment(created_by) / category / f"v{version}" / _artifact_filename(name, content)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
     item_id = new_id("art")
@@ -361,26 +497,6 @@ def workflows() -> list[dict[str, str]]:
     return list_workflows()
 
 
-def _run_agent_step(run: dict[str, Any], definition: WorkflowDefinition, step: dict[str, Any]) -> dict[str, Any]:
-    prompt = _render_prompt(run["id"], definition, step)
-    package = write_artifact(
-        run["id"],
-        f"{step['id']}_agent_task",
-        prompt,
-        category="agent-task",
-        created_by=step.get("agent", "agent"),
-        metadata={"agent": step.get("agent"), "step_id": step["id"]},
-    )
-    command = build_agent_command(run["project"]["platform"], Path(package["path"]))
-    execution = maybe_run_command(command)
-    _ensure_agent_execution_completed(execution, step["id"])
-    outputs = []
-    for artifact_name in step.get("outputs", []):
-        content = _agent_output_content(step, artifact_name, prompt, execution)
-        outputs.append(write_artifact(run["id"], artifact_name, content, category=step.get("artifact_category", "agent"), created_by=step.get("agent", "agent")))
-    return {"agent": step.get("agent"), "task_package": package, "execution": execution, "outputs": outputs}
-
-
 def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, Any]) -> str:
     refs = []
     for name in step.get("inputs", []):
@@ -390,15 +506,35 @@ def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, 
         except WorkflowError:
             refs.append(f"## 输入产物：{name}\n\n<missing>")
     profile = load_agent_profile(step.get("agent", "workflow"))
+    agent = step.get("agent", "agent")
+    memory_path = memory_root() / f"{agent}.md"
+    memory_text = memory_path.read_text(encoding="utf-8") if memory_path.exists() else ""
+    run = get_run(run_id)
     return "\n\n".join(
         [
             f"# 工作流步骤：{step['id']}",
             f"工作流：{definition.workflow_id}",
-            f"Agent: {step.get('agent', 'workflow')}",
+            f"Agent: {agent}",
+            "## 当前运行状态",
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "run_status": run["status"],
+                    "current_step": run["current_step"],
+                    "prd_version": run.get("prd_version", 0),
+                    "review_round": run.get("review_round", 0),
+                    "step_kind": step.get("kind") or step["id"],
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             "## Agent 画像",
             json.dumps(profile, ensure_ascii=False, indent=2),
             "## Agent 执行说明",
             str(profile.get("instructions") or "").strip(),
+            "## Agent 记忆空间",
+            json.dumps({"memory_path": str(memory_path)}, ensure_ascii=False, indent=2),
+            memory_text[-4000:] if memory_text else "暂无记忆。",
             "## 输入列表",
             "\n\n".join(refs) if refs else "No explicit input artifacts.",
             "## 项目工作区",
@@ -407,6 +543,7 @@ def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, 
                     "project_root": str(Path.cwd()),
                     "artifact_root": str(artifact_root()),
                     "source_root": str(source_root()),
+                    "memory_root": str(memory_root()),
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -414,50 +551,261 @@ def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, 
             "## 必须输出",
             json.dumps(step.get("outputs", []), ensure_ascii=False, indent=2),
             "## 输出契约",
-            "只返回当前步骤的一份完整 Markdown 结果。不要自行推进工作流状态，不要创建额外步骤。",
+            _output_contract(step),
         ]
     )
 
 
-def _ensure_agent_execution_completed(execution: dict[str, Any], step_id: str) -> None:
-    if not execution.get("executed"):
-        return
-    if execution_needs_permission(execution):
-        raise WorkflowError(f"{step_id} was blocked by interactive Codex permission approval")
-    if int(execution.get("returncode") or 0) != 0:
-        detail = str(execution.get("stderr") or execution.get("stdout") or "")[-800:]
-        raise WorkflowError(f"{step_id} Codex CLI failed: {detail}")
+def _output_contract(step: dict[str, Any]) -> str:
+    if step["id"] == "product-manager":
+        return "输出一份完整中文 PRD V1 Markdown。完成后不要继续 UI/开发，等待老板确认或多 Agent 评审。"
+    if step.get("kind") == "prd_review":
+        return "输出一份中文 PRD 评审意见 Markdown，只评价最新 PRD 的问题、风险、遗漏和修改建议，不直接改 PRD。"
+    if step.get("kind") == "prd_revision":
+        return "整合各 Agent 评审意见，输出下一版完整中文 PRD Markdown。必须说明相对上一版的变更点。完成后等待老板再次确认。"
+    return "只返回当前步骤的一份完整 Markdown 结果。不要自行推进工作流状态，不要创建额外步骤。"
 
 
-def _agent_output_content(step: dict[str, Any], artifact_name: str, prompt: str, execution: dict[str, Any]) -> str:
-    if execution.get("executed") and int(execution.get("returncode") or 0) == 0:
-        stdout = str(execution.get("stdout") or "").strip()
-        if stdout:
-            return stdout if stdout.startswith("#") else f"# {step['name']} / {artifact_name}\n\n{stdout}\n"
-    return (
-        f"# {step['name']} / {artifact_name}\n\n"
-        f"由 `{step.get('agent', 'agent')}` 生成。\n\n"
-        "## 工作流步骤\n\n"
-        f"- 步骤：`{step['id']}`\n"
-        f"- Agent: `{step.get('agent', 'agent')}`\n"
-        f"- 提示词字符数：{len(prompt)}\n\n"
-        "## 执行状态\n\n"
-        f"```json\n{json.dumps(execution, ensure_ascii=False, indent=2)}\n```\n\n"
-        "## 摘要\n\n"
-        "当前未启用 Codex CLI 执行，因此此产物记录预备任务包和上下文交接信息。\n"
+def _normalize_agent_output(output: str | dict[str, Any], artifact_names: list[str]) -> dict[str, str]:
+    if not artifact_names:
+        return {}
+    if isinstance(output, dict):
+        values: dict[str, str] = {}
+        for name in artifact_names:
+            raw = output.get(name)
+            if raw is None:
+                raw = output.get("content") if len(artifact_names) == 1 else None
+            if raw is None:
+                raise WorkflowError(f"missing output artifact content: {name}")
+            values[name] = raw if isinstance(raw, str) else json.dumps(raw, ensure_ascii=False, indent=2)
+        return values
+    if len(artifact_names) != 1:
+        raise WorkflowError("string output can only be used when the step declares exactly one output artifact")
+    return {artifact_names[0]: output}
+
+
+def _step_for_job(run: dict[str, Any], job: dict[str, Any], payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        return load_workflow(run["workflow_id"]).step(job["step_id"])
+    except KeyError:
+        payload = payload if payload is not None else json.loads(job.get("payload_json") or "{}")
+        step = payload.get("step")
+        if not isinstance(step, dict):
+            raise WorkflowError(f"dynamic job missing step definition: {job['step_id']}")
+        return step
+
+
+def _prd_review_step(*, reviewer: str, prd_version: int, round_no: int) -> dict[str, Any]:
+    return {
+        "id": f"prd-v{prd_version}-review-r{round_no}-{reviewer}",
+        "name": f"PRD V{prd_version} 第 {round_no} 轮 {reviewer} 评审",
+        "category": "review",
+        "executor": "agent",
+        "agent": reviewer,
+        "artifact_category": "review",
+        "inputs": ["prd"],
+        "outputs": [f"prd_review_{reviewer}_v{prd_version}_r{round_no}"],
+        "kind": "prd_review",
+        "target_prd_version": prd_version,
+        "review_round": round_no,
+    }
+
+
+def _prd_revision_step(*, prd_version: int, round_no: int) -> dict[str, Any]:
+    review_inputs = [f"prd_review_{reviewer}_v{prd_version}_r{round_no}" for reviewer in ["ui-designer", "frontend-impl", "backend-impl", "qa-tester"]]
+    return {
+        "id": f"prd-v{prd_version}-revision-r{round_no}",
+        "name": f"PRD V{prd_version} 第 {round_no} 轮评审意见整合",
+        "category": "product",
+        "executor": "agent",
+        "agent": "product-manager",
+        "artifact_category": "product",
+        "inputs": ["prd", *review_inputs],
+        "outputs": ["prd"],
+        "kind": "prd_revision",
+        "target_prd_version": prd_version,
+        "review_round": round_no,
+    }
+
+
+def _complete_step_transition(run_id: str, step: dict[str, Any], outputs: list[dict[str, Any]], result: dict[str, Any], *, job_id: str) -> dict[str, Any]:
+    kind = step.get("kind")
+    if step["id"] == "product-manager" or kind == "prd_revision":
+        prd_artifact = next((item for item in outputs if item["name"] == "prd"), None)
+        version = int(prd_artifact["version"]) if prd_artifact else _latest_artifact_version(run_id, "prd")
+        _set_run_state(run_id, status_value="waiting_owner_review", current_step="owner-review", prd_version=version)
+        return {
+            "next_step": None,
+            "event_type": "prd.ready_for_owner_review",
+            "message": f"{step.get('agent', 'product-manager')} 已完成 PRD V{version}，等待老板确认或发起多 Agent 评审。",
+            "prd_version": version,
+        }
+    if kind == "prd_review":
+        _record_review(run_id, step, outputs, result)
+        if _has_pending_review_jobs(run_id, int(step["review_round"]), excluding_job_id=job_id):
+            _set_run_state(run_id, status_value="reviewing", current_step=f"prd-v{step['target_prd_version']}-review-r{step['review_round']}")
+            return {
+                "next_step": None,
+                "event_type": "prd.review_agent_completed",
+                "message": f"{step.get('agent')} 已完成 PRD V{step['target_prd_version']} 评审，等待其他 Agent。",
+            }
+        revision = _prd_revision_step(prd_version=int(step["target_prd_version"]), round_no=int(step["review_round"]))
+        enqueue_dynamic_step(run_id, revision, {"target_prd_version": step["target_prd_version"], "review_round": step["review_round"]})
+        _set_run_state(run_id, status_value="prd_revision", current_step=revision["id"])
+        return {
+            "next_step": revision["id"],
+            "event_type": "prd.review_completed",
+            "message": f"PRD V{step['target_prd_version']} 第 {step['review_round']} 轮评审已完成，已派发 product-manager 输出下一版 PRD。",
+        }
+    next_step = _next_step(step)
+    _move_to_next(run_id, next_step)
+    if next_step:
+        enqueue_step(run_id, next_step)
+    return {"next_step": next_step}
+
+
+def _latest_artifact_version(run_id: str, name: str) -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT MAX(version) AS version FROM artifacts WHERE run_id = ? AND name = ?", (run_id, name)).fetchone()
+    return int(row["version"] or 0)
+
+
+def _has_pending_review_jobs(run_id: str, round_no: int, *, excluding_job_id: str | None = None) -> bool:
+    pattern = f"prd-%-review-r{round_no}-%"
+    exclude_sql = "AND id != ?" if excluding_job_id else ""
+    params: list[Any] = [run_id, pattern]
+    if excluding_job_id:
+        params.append(excluding_job_id)
+    with connect() as conn:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count FROM jobs WHERE run_id = ? AND step_id LIKE ? AND status IN ('pending','running') {exclude_sql}",
+            params,
+        ).fetchone()
+    return int(row["count"] or 0) > 0
+
+
+def _record_review(run_id: str, step: dict[str, Any], outputs: list[dict[str, Any]], result: dict[str, Any]) -> None:
+    output = outputs[0] if outputs else {}
+    summary = ""
+    if output.get("path"):
+        text = Path(output["path"]).read_text(encoding="utf-8")
+        summary = text.strip().splitlines()[0][:200] if text.strip() else ""
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO workflow_reviews(id,run_id,target_artifact_id,round,reviewer_agent,opinion_path,summary,severity,created_at)
+            VALUES(?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                new_id("rev"),
+                run_id,
+                result.get("metadata", {}).get("target_artifact_id"),
+                int(step.get("review_round") or 0),
+                step.get("agent", "agent"),
+                output.get("path"),
+                summary,
+                result.get("metadata", {}).get("severity", ""),
+                now_iso(),
+            ),
+        )
+
+
+def _initialize_run_memories(run_id: str) -> None:
+    root = memory_root()
+    root.mkdir(parents=True, exist_ok=True)
+    ts = now_iso()
+    with connect() as conn:
+        for agent_id in PROJECT_AGENT_IDS:
+            path = root / f"{agent_id}.md"
+            conn.execute(
+                """
+                INSERT INTO agent_memory(id,run_id,agent_name,memory_path,last_summary,updated_at)
+                VALUES(?,?,?,?,?,?)
+                ON CONFLICT(run_id, agent_name) DO UPDATE SET memory_path=excluded.memory_path, updated_at=excluded.updated_at
+                """,
+                (new_id("mem"), run_id, agent_id, str(path), "", ts),
+            )
+
+
+def _update_agent_memory(run_id: str, agent: str, output_map: dict[str, str], outputs: list[dict[str, Any]]) -> None:
+    root = memory_root()
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / f"{agent}.md"
+    if not path.exists():
+        path.write_text(f"# {agent} 记忆\n\n", encoding="utf-8")
+    artifact_lines = "\n".join(f"- `{item['name']}` v{item['version']}: {item['path']}" for item in outputs)
+    summary_source = "\n\n".join(output_map.values()).strip()
+    summary = summary_source[:500].replace("\n", " ")
+    entry = (
+        f"\n## {now_iso()} / {run_id}\n\n"
+        f"产物：\n{artifact_lines or '- 无'}\n\n"
+        f"摘要：{summary or '无'}\n"
     )
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(entry)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO agent_memory(id,run_id,agent_name,memory_path,last_summary,updated_at)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(run_id, agent_name) DO UPDATE SET
+              memory_path=excluded.memory_path,
+              last_summary=excluded.last_summary,
+              updated_at=excluded.updated_at
+            """,
+            (new_id("mem"), run_id, agent, str(path), summary, now_iso()),
+        )
+
+
+def _manager_next_action(run: dict[str, Any], pending_jobs: list[str], running_jobs: list[str]) -> str:
+    if running_jobs:
+        return f"等待运行中的 Agent 完成：{', '.join(running_jobs)}"
+    if pending_jobs:
+        return f"继续派发待办 Agent：{', '.join(pending_jobs)}"
+    if run["status"] == "waiting_owner_review":
+        version = run.get("prd_version", 0)
+        return f"请老板确认 PRD V{version}，或要求多 Agent 评审后输出下一版。"
+    if run["status"] == "completed":
+        return "交付流程已完成，可以读取最终 QA 报告和主管总结。"
+    return "请根据当前状态决定创建任务、确认 PRD、发起评审或继续派发。"
 
 
 def _next_step(step: dict[str, Any]) -> str | None:
     return (step.get("next") or {}).get("default")
 
 
-def _move_to_next(run_id: str, next_step: str | None) -> None:
+def _move_to_next(run_id: str, next_step: str | None, *, status_value: str | None = None) -> None:
     ts = now_iso()
-    status_value = "completed" if next_step is None else "running"
+    status_value = status_value or ("completed" if next_step is None else "running")
     current_step = next_step or ""
     with connect() as conn:
         conn.execute("UPDATE workflow_runs SET current_step = ?, status = ?, updated_at = ? WHERE id = ?", (current_step, status_value, ts, run_id))
+        conn.execute(
+            "UPDATE projects SET status = ?, updated_at = ? WHERE id = (SELECT project_id FROM workflow_runs WHERE id = ?)",
+            (status_value, ts, run_id),
+        )
+
+
+def _set_run_state(
+    run_id: str,
+    *,
+    status_value: str,
+    current_step: str,
+    prd_version: int | None = None,
+    review_round: int | None = None,
+) -> None:
+    ts = now_iso()
+    assignments = ["current_step = ?", "status = ?", "updated_at = ?"]
+    params: list[Any] = [current_step, status_value, ts]
+    if prd_version is not None:
+        assignments.append("prd_version = ?")
+        params.append(prd_version)
+    if review_round is not None:
+        assignments.append("review_round = ?")
+        params.append(review_round)
+    params.append(run_id)
+    with connect() as conn:
+        conn.execute(f"UPDATE workflow_runs SET {', '.join(assignments)} WHERE id = ?", params)
         conn.execute(
             "UPDATE projects SET status = ?, updated_at = ? WHERE id = (SELECT project_id FROM workflow_runs WHERE id = ?)",
             (status_value, ts, run_id),
@@ -502,11 +850,9 @@ def _mark_step(run_id: str, step: dict[str, Any], status_value: str, payload: di
 
 
 def _execution_policy(config: dict[str, Any]) -> dict[str, Any]:
-    enabled = bool((config.get("code_platforms") or {}).get("enable_agent_cli"))
     return {
-        "enable_agent_cli": enabled,
-        "mode": "codex_cli_enabled" if enabled else "prepared_only",
-        "rule": "关闭时只写入任务包和预备产物，不启动 Codex CLI。",
+        "mode": "runtime_subagent",
+        "rule": "默认由主 Codex Agent 调用 spawn_agent 执行子 Agent，MCP 负责状态和产物。",
     }
 
 
@@ -540,3 +886,7 @@ def _new_project_id(title: str) -> str:
         slug = "project"
     base = new_id("proj")
     return f"{base}-{slug[:40]}"
+
+
+def _requirement_pointer(requirement: str) -> str:
+    return f"完整原始需求已归档到 raw_requirement 产物；字符数：{len(requirement)}。"
