@@ -200,15 +200,55 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
 
 
 def _read_message() -> dict[str, Any] | None:
-    line = sys.stdin.readline()
+    stream = getattr(sys.stdin, "buffer", sys.stdin)
+    line = stream.readline()
     if not line:
         return None
-    return json.loads(line)
+    if isinstance(line, str):
+        line_text = line
+        line_bytes = line.encode("utf-8")
+    else:
+        line_bytes = line
+        line_text = line.decode("utf-8")
+    if line_text.lstrip().startswith("{"):
+        return json.loads(line_text)
+
+    headers: dict[str, str] = {}
+    while line_bytes not in {b"\r\n", b"\n", b""}:
+        name, separator, value = line_text.partition(":")
+        if separator:
+            headers[name.strip().lower()] = value.strip()
+        line = stream.readline()
+        if not line:
+            return None
+        if isinstance(line, str):
+            line_text = line
+            line_bytes = line.encode("utf-8")
+        else:
+            line_bytes = line
+            line_text = line.decode("utf-8")
+
+    content_length = headers.get("content-length")
+    if not content_length:
+        raise ValueError("missing Content-Length header")
+    body = stream.read(int(content_length))
+    if isinstance(body, str):
+        body_text = body
+    else:
+        body_text = body.decode("utf-8")
+    return json.loads(body_text)
 
 
 def _write_message(message: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(message, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    body = json.dumps(message, ensure_ascii=False).encode("utf-8")
+    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+    stream = getattr(sys.stdout, "buffer", None)
+    if stream is None:
+        sys.stdout.write((header + body).decode("utf-8"))
+        sys.stdout.flush()
+        return
+    stream.write(header + body)
+    stream.flush()
 
 
 if __name__ == "__main__":

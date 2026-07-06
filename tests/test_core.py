@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import tomllib
 import unittest
 from copy import deepcopy
 from pathlib import Path
 
-from delivery_workflow import engine
+from delivery_workflow import __version__, engine
 from delivery_workflow.config import (
     DEFAULT_CONFIG_TEMPLATE,
     PROJECT_CODEX_CONFIG,
@@ -68,6 +70,19 @@ def _has_cjk(text: str) -> bool:
 
 def _is_ascii_nickname(text: str) -> bool:
     return bool(text) and text.isascii()
+
+
+def _mcp_frame(message: dict) -> bytes:
+    body = json.dumps(message).encode("utf-8")
+    return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
+
+
+def _read_mcp_frame(data: bytes) -> dict:
+    header, body = data.split(b"\r\n\r\n", 1)
+    length = int(
+        next(line.split(b":", 1)[1].strip() for line in header.splitlines() if line.lower().startswith(b"content-length:"))
+    )
+    return json.loads(body[:length].decode("utf-8"))
 
 
 class CodexDeliveryWorkflowTest(unittest.TestCase):
@@ -161,6 +176,9 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         skill = (ROOT / "skills" / PLUGIN_NAME / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertEqual(plugin["name"], PLUGIN_NAME)
+        self.assertEqual(plugin["version"], "0.1.20")
+        self.assertEqual(pyproject["project"]["version"], plugin["version"])
+        self.assertEqual(__version__, plugin["version"])
         self.assertEqual(pyproject["project"]["name"], PLUGIN_NAME)
         self.assertEqual(marketplace["plugins"][0]["name"], PLUGIN_NAME)
         self.assertEqual(plugin["mcpServers"], "./.codex-plugin/mcp.json")
@@ -553,6 +571,28 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             ],
         )
         self.assertFalse(any("lark" in name or "feishu" in name or "bug" in name or "gate" in name for name in tool_names))
+
+    def test_mcp_server_accepts_content_length_framed_initialize(self) -> None:
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": {"name": "test", "version": "0"}},
+        }
+
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "codex-deliveryflow-mcp")],
+            input=_mcp_frame(initialize),
+            cwd=self.tmp.name,
+            capture_output=True,
+            timeout=3,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8"))
+        response = _read_mcp_frame(completed.stdout)
+        self.assertEqual(response["id"], 1)
+        self.assertEqual(response["result"]["serverInfo"]["name"], PLUGIN_NAME)
+        self.assertEqual(response["result"]["protocolVersion"], "2024-11-05")
 
     def test_legacy_worker_platform_and_hook_python_files_are_removed(self) -> None:
         legacy_files = [
