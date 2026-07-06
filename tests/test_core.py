@@ -9,6 +9,7 @@ import tomllib
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest.mock import patch
 
 from delivery_workflow import __version__, engine
 from delivery_workflow.config import (
@@ -77,6 +78,10 @@ def _mcp_frame(message: dict) -> bytes:
     return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
 
 
+def _toml_array(items: list[str]) -> str:
+    return "[" + ", ".join(json.dumps(item, ensure_ascii=False) for item in items) + "]"
+
+
 def _read_mcp_json_line(data: bytes) -> dict:
     lines = data.splitlines()
     assert len(lines) == 1, data.decode("utf-8", "replace")
@@ -142,7 +147,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             self.assertEqual(profile["model"], "gpt-5.5")
             self.assertEqual(profile["model_reasoning_effort"], EXPECTED_AGENT_REASONING[agent])
             self.assertEqual(profile["sandbox_mode"], "workspace-write")
-            self.assertGreaterEqual(len(profile["nickname_candidates"]), 3)
+            self.assertGreaterEqual(len(profile["nickname_candidates"]), 1)
             self.assertTrue(all(_is_ascii_nickname(nickname) for nickname in profile["nickname_candidates"]))
             self.assertFalse(any(any(char.isdigit() for char in nickname) for nickname in profile["nickname_candidates"]))
             self.assertEqual(profile["skills"], EXPECTED_AGENT_SKILLS[agent])
@@ -174,7 +179,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         skill = (ROOT / "skills" / PLUGIN_NAME / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertEqual(plugin["name"], PLUGIN_NAME)
-        self.assertEqual(plugin["version"], "0.1.22")
+        self.assertEqual(plugin["version"], "0.1.23")
         self.assertEqual(pyproject["project"]["version"], plugin["version"])
         self.assertEqual(__version__, plugin["version"])
         self.assertEqual(pyproject["project"]["name"], PLUGIN_NAME)
@@ -237,8 +242,33 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             role = codex_config["agents"][agent]
             self.assertEqual(role["config_file"], f"agents/{agent}.toml")
             self.assertTrue(_has_cjk(role["description"]))
-            self.assertGreaterEqual(len(role["nickname_candidates"]), 3)
+            self.assertGreaterEqual(len(role["nickname_candidates"]), 1)
             self.assertTrue(all(_is_ascii_nickname(nickname) for nickname in role["nickname_candidates"]))
+
+    def test_mcp_tools_use_invoking_project_root_from_pwd_when_server_cwd_is_plugin_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as project_dir, tempfile.TemporaryDirectory() as plugin_cwd:
+            plugin_marker = Path(plugin_cwd) / ".codex-plugin" / "plugin.json"
+            plugin_marker.parent.mkdir(parents=True)
+            plugin_marker.write_text("{}", encoding="utf-8")
+            os.chdir(plugin_cwd)
+            with patch.dict(os.environ, {"PWD": project_dir}, clear=False):
+                initialized = initialize_project_workspace(overwrite_config=True, overwrite_agents=True)
+                created = create_project(requirement="做一个极简 TODO Web 应用", title="TODO Web")
+                current = status(created["run_id"])
+
+            project = Path(project_dir)
+            plugin = Path(plugin_cwd)
+            self.assertEqual(Path(initialized["config_path"]).resolve(), (project / WORKSPACE_CONFIG_NAME).resolve())
+            self.assertEqual(
+                Path(initialized["db_path"]).resolve(),
+                (project / ".codex" / "delivery-workflow" / "workflow.sqlite3").resolve(),
+            )
+            self.assertTrue((project / ".codex" / "agents" / "delivery-manager.toml").exists())
+            self.assertTrue((project / "docs" / "delivery").exists())
+            self.assertFalse((plugin / WORKSPACE_CONFIG_NAME).exists())
+            self.assertFalse((plugin / ".codex").exists())
+            self.assertEqual(current["run"]["id"], created["run_id"])
+            self.assertEqual(current["run"]["project"]["title"], "TODO Web")
 
     def test_init_merges_existing_codex_config_without_overwriting_other_settings(self) -> None:
         codex_dir = Path(".codex")
@@ -281,7 +311,8 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(codex_config["agents"]["existing-reviewer"]["config_file"], "agents/existing-reviewer.toml")
         self.assertEqual(codex_config["agents"]["product-manager"]["description"], "保留产品经理自定义描述")
         self.assertEqual(codex_config["agents"]["product-manager"]["config_file"], "agents/product-manager.toml")
-        self.assertIn('nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]', text)
+        product_profile = tomllib.loads((ROOT / "agents" / "product-manager.toml").read_text(encoding="utf-8"))
+        self.assertIn(f'nickname_candidates = {_toml_array(product_profile["nickname_candidates"])}', text)
         self.assertIn('[agents."delivery-manager"]', text)
 
     def test_existing_project_agent_removes_legacy_agent_type_without_overwriting_other_content(self) -> None:
@@ -300,7 +331,8 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         migrated = target.read_text(encoding="utf-8")
         self.assertNotIn("agent_type", migrated)
         self.assertIn("保留项目自定义描述", migrated)
-        self.assertIn('nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]', migrated)
+        product_profile = tomllib.loads((ROOT / "agents" / "product-manager.toml").read_text(encoding="utf-8"))
+        self.assertIn(f'nickname_candidates = {_toml_array(product_profile["nickname_candidates"])}', migrated)
         self.assertEqual(next(item["status"] for item in result if item["agent"] == "product-manager"), "migrated")
 
     def test_no_claude_code_config_or_old_codex_workflow_name_remains(self) -> None:

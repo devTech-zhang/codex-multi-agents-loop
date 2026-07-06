@@ -43,7 +43,9 @@ def _workflow_log_path() -> Path:
 
         return storage_path(load_config(), "logs", ".codex/delivery-workflow/logs") / "workflow.log"
     except Exception:
-        return Path.cwd() / ".codex" / "delivery-workflow" / "logs" / "workflow.log"
+        from .config import workspace_root
+
+        return workspace_root() / ".codex" / "delivery-workflow" / "logs" / "workflow.log"
 
 
 def _sanitize(value: Any) -> Any:

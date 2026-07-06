@@ -12,6 +12,7 @@ from .config import (
     initialize_agent_memory_files,
     load_config,
     materialize_project_agents,
+    workspace_root,
     write_workspace_config,
 )
 from .definitions import WorkflowDefinition, list_workflows, load_agent_profile, load_workflow
@@ -83,10 +84,10 @@ def create_project(
                 "business_goal": business_goal or "",
                 "requires_frontend": requires_frontend,
                 "requires_backend": requires_backend,
-                "project_root": str(Path.cwd()),
+                "project_root": str(workspace_root()),
                 "artifact_root": str(artifact_root()),
                 "source_root": str(source_root()),
-                "agent_dir": str(Path.cwd() / ".codex" / "agents"),
+                "agent_dir": str(workspace_root() / ".codex" / "agents"),
                 "memory_root": str(memory_root()),
                 "workflow_state": "PRD V1 完成后会暂停，等待老板确认或发起多 Agent 评审。",
             },
@@ -106,9 +107,9 @@ def create_project(
         "workflow_id": workflow_id,
         "artifact_dir": str(artifact_root()),
         "source_dir": str(source_root()),
-        "agent_dir": str(Path.cwd() / ".codex" / "agents"),
+        "agent_dir": str(workspace_root() / ".codex" / "agents"),
         "memory_dir": str(memory_root()),
-        "config_path": str(Path.cwd() / WORKSPACE_CONFIG_NAME),
+        "config_path": str(workspace_root() / WORKSPACE_CONFIG_NAME),
         "execution_policy": _execution_policy(config),
     }
     result["next_handoff"] = prepare_agent_handoff(run_id=run_id, agent=start_step)
@@ -677,7 +678,7 @@ def _render_prompt(run_id: str, definition: WorkflowDefinition, step: dict[str, 
             "## 项目工作区",
             json.dumps(
                 {
-                    "project_root": str(Path.cwd()),
+                    "project_root": str(workspace_root()),
                     "artifact_root": str(artifact_root()),
                     "source_root": str(source_root()),
                     "memory_root": str(memory_root()),
@@ -1003,7 +1004,7 @@ def _execution_policy(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ensure_workspace_files() -> None:
-    if not (Path.cwd() / WORKSPACE_CONFIG_NAME).exists():
+    if not (workspace_root() / WORKSPACE_CONFIG_NAME).exists():
         write_workspace_config(overwrite=False)
 
 

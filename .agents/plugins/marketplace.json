@@ -14,7 +14,7 @@
             "source": {
                 "source": "url",
                 "url": "https://github.com/devTech-zhang/multi-agent-delivery-workflow.git",
-                "ref": "codex-delivery-workflow"
+                "ref": "main"
             }
         }
     ]

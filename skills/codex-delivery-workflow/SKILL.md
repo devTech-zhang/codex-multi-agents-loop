@@ -24,6 +24,8 @@ description: 当用户要在当前项目初始化、启动、检查或推进 Cod
 codex_delivery_workflow_init_project
 ```
 
+调用 `codex_delivery_workflow_*` MCP 工具时，如果工具参数中有 `project_root`，必须传当前 Codex 会话所在项目的绝对路径。插件会优先使用 `project_root`，否则再从 Codex 进程环境里识别当前项目；不要让工具按插件缓存目录执行初始化或状态查询。
+
 该工具会写入：
 
 ```text

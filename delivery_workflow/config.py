@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tomllib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +14,7 @@ WORKSPACE_CONFIG_NAME = "workflow.config.json"
 PLUGIN_CONFIG_NAME = "codex-delivery-workflow.config.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PLUGIN_ROOT = PACKAGE_ROOT.parent
+_WORKSPACE_ROOT_OVERRIDE: ContextVar[Path | None] = ContextVar("codex_delivery_workspace_root", default=None)
 PROJECT_CODEX_DIR = ".codex"
 PROJECT_CODEX_CONFIG = ".codex/config.toml"
 PROJECT_AGENT_DIR = ".codex/agents"
@@ -74,14 +79,15 @@ def config_sources() -> list[str]:
 
 
 def workspace_config_path() -> Path:
-    for candidate in (Path.cwd() / WORKSPACE_CONFIG_NAME, Path.cwd() / PLUGIN_CONFIG_NAME):
+    root = workspace_root()
+    for candidate in (root / WORKSPACE_CONFIG_NAME, root / PLUGIN_CONFIG_NAME):
         if candidate.exists():
             return candidate
     return PLUGIN_ROOT / PLUGIN_CONFIG_NAME
 
 
 def write_workspace_config(*, overwrite: bool = False) -> Path:
-    target = Path.cwd() / WORKSPACE_CONFIG_NAME
+    target = workspace_root() / WORKSPACE_CONFIG_NAME
     if target.exists() and not overwrite:
         raise FileExistsError(f"config already exists: {target}")
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -99,7 +105,8 @@ def initialize_project_workspace(*, overwrite_config: bool = False, overwrite_ag
         "开始初始化当前 Codex 交付工作流工作区。",
         payload={"overwrite_config": overwrite_config, "overwrite_agents": overwrite_agents},
     )
-    config_path = Path.cwd() / WORKSPACE_CONFIG_NAME
+    root = workspace_root()
+    config_path = root / WORKSPACE_CONFIG_NAME
     if overwrite_config or not config_path.exists():
         config_path = write_workspace_config(overwrite=overwrite_config)
     from .storage import init_db
@@ -118,7 +125,8 @@ def initialize_project_workspace(*, overwrite_config: bool = False, overwrite_ag
         "logs": str(log_root()),
         "artifact_root": str(artifact_root()),
         "source_root": str(source_root()),
-        "agent_dir": str(Path.cwd() / PROJECT_AGENT_DIR),
+        "project_root": str(root),
+        "agent_dir": str(root / PROJECT_AGENT_DIR),
         "agents": agents,
         "memory_root": str(memory_root()),
         "memories": memories,
@@ -129,7 +137,7 @@ def initialize_project_workspace(*, overwrite_config: bool = False, overwrite_ag
 
 
 def materialize_project_agents(*, overwrite: bool = False) -> list[dict[str, Any]]:
-    agent_dir = Path.cwd() / PROJECT_AGENT_DIR
+    agent_dir = workspace_root() / PROJECT_AGENT_DIR
     agent_dir.mkdir(parents=True, exist_ok=True)
     written: list[dict[str, Any]] = []
     for agent_id in PROJECT_AGENT_IDS:
@@ -149,7 +157,7 @@ def materialize_project_agents(*, overwrite: bool = False) -> list[dict[str, Any
 
 
 def materialize_project_codex_config() -> dict[str, Any]:
-    target = Path.cwd() / PROJECT_CODEX_CONFIG
+    target = workspace_root() / PROJECT_CODEX_CONFIG
     target.parent.mkdir(parents=True, exist_ok=True)
     existed = target.exists()
     original = target.read_text(encoding="utf-8") if existed else ""
@@ -221,7 +229,54 @@ def storage_config(config: dict[str, Any]) -> dict[str, Any]:
 def storage_path(config: dict[str, Any], key: str, fallback: str) -> Path:
     value = storage_config(config).get(key) or fallback
     path = Path(str(value))
-    return path if path.is_absolute() else Path.cwd() / path
+    return path if path.is_absolute() else workspace_root() / path
+
+
+def workspace_root() -> Path:
+    override = _WORKSPACE_ROOT_OVERRIDE.get()
+    if override is not None:
+        return override
+    env_root = _workspace_root_from_env()
+    return env_root or Path.cwd()
+
+
+@contextmanager
+def use_workspace_root(path: str | Path | None) -> Iterator[None]:
+    if path is None or str(path).strip() == "":
+        yield
+        return
+    token = _WORKSPACE_ROOT_OVERRIDE.set(Path(path).expanduser().resolve())
+    try:
+        yield
+    finally:
+        _WORKSPACE_ROOT_OVERRIDE.reset(token)
+
+
+def _workspace_root_from_env() -> Path | None:
+    if not _current_process_is_plugin_runtime():
+        return None
+    cwd = _resolved_path(Path.cwd())
+    plugin_root = _resolved_path(PLUGIN_ROOT)
+    for name in ("CODEX_WORKSPACE_ROOT", "CODEX_PROJECT_ROOT", "CODEX_CWD", "PWD"):
+        value = os.environ.get(name)
+        if not value:
+            continue
+        resolved = _resolved_path(Path(value).expanduser())
+        if resolved != cwd and resolved != plugin_root:
+            return resolved
+    return None
+
+
+def _current_process_is_plugin_runtime() -> bool:
+    cwd = _resolved_path(Path.cwd())
+    return (cwd / ".codex-plugin" / "plugin.json").exists()
+
+
+def _resolved_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
 
 
 def _read_json(path: Path) -> dict[str, Any]:

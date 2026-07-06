@@ -5,7 +5,7 @@ import sys
 from typing import Any
 
 from . import __version__
-from .config import initialize_project_workspace
+from .config import initialize_project_workspace, use_workspace_root
 from .engine import (
     complete_agent_step,
     confirm_prd,
@@ -118,6 +118,18 @@ TOOLS = [
 ]
 
 
+for tool in TOOLS:
+    schema = tool.setdefault("inputSchema", {"type": "object", "properties": {}})
+    properties = schema.setdefault("properties", {})
+    properties.setdefault(
+        "project_root",
+        {
+            "type": "string",
+            "description": "当前 Codex 会话的项目根目录；当 MCP server 的 cwd 是插件目录时用于定位真实工作区。",
+        },
+    )
+
+
 def main() -> None:
     while True:
         message = _read_message()
@@ -158,6 +170,13 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _call_tool(name: str, args: dict[str, Any]) -> Any:
+    project_root = args.get("project_root")
+    clean_args = {key: value for key, value in args.items() if key != "project_root"}
+    with use_workspace_root(project_root):
+        return _call_tool_in_workspace(name, clean_args)
+
+
+def _call_tool_in_workspace(name: str, args: dict[str, Any]) -> Any:
     if name in {"codex_delivery_workflow_init", "codex_delivery_workflow_init_project"}:
         return initialize_project_workspace(overwrite_config=bool(args.get("overwrite_config")), overwrite_agents=bool(args.get("overwrite_agents")))
     if name == "codex_delivery_workflow_create":

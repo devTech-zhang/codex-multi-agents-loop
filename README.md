@@ -1,40 +1,133 @@
-# Codex 交付工作流
+<p align="center">
+  <img src="./assets/codex-delivery-workflow-logo.png" alt="codex-delivery-workflow 标志" width="128" />
+</p>
 
-`codex-delivery-workflow` 是一个面向 Codex 的轻量交付工作流插件。它把当前项目初始化成一个多 Agent 协作工作台：老板可以找主管推进完整任务，也可以直接 `@product-manager`、`@ui-designer`、`@frontend-impl`、`@backend-impl`、`@qa-tester` 找对应员工处理自己的部分。
+<h1 align="center">codex-delivery-workflow</h1>
 
-## 当前范围
+<p align="center">
+  把一句需求交给一支 Codex 原生 Agent 团队，从 PRD、设计、开发到测试持续推进，并让每一步都有状态、有记忆、有产物。
+</p>
 
-本分支只保留最小闭环：
+<p align="center">
+  <a href="https://github.com/devTech-zhang/multi-agent-delivery-workflow/stargazers"><img src="https://img.shields.io/github/stars/devTech-zhang/multi-agent-delivery-workflow?style=flat-square" alt="GitHub Stars" /></a>
+  <img src="https://img.shields.io/badge/Codex-Plugin-111827?style=flat-square" alt="Codex Plugin" />
+  <img src="https://img.shields.io/badge/Multi--Agent-1%20Manager%20%2B%205%20Agents-2563EB?style=flat-square" alt="1 名主管和 5 名专业 Agent" />
+  <img src="https://img.shields.io/badge/MCP-stdio-0F766E?style=flat-square" alt="MCP stdio" />
+  <img src="https://img.shields.io/badge/Python-%3E%3D3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11+" />
+</p>
 
-- 项目级 Agent：init 后写入 `.codex/agents/*.toml`，让 Codex 可以在当前项目里识别主管和员工。
-- 薄状态账本：SQLite 只记录 project、run、job、step、artifact、review、event 和 agent memory 的状态、版本、路径和短摘要；完整需求、PRD、设计、实现和测试报告都放在文件产物里。
-- PRD 审核循环：PRD V1 先给老板确认；老板可要求多 Agent 评审，由产品 Agent 整合为 V2/V3。
-- 产物归档：所有产物写入 `docs/delivery/`，按 run、Agent、类别和版本归档。
-- 主管调度与汇总：`delivery-manager` 负责创建 run、按语义和 pending job 主动 spawn 自定义 Agent、状态总结、产物归纳、阻塞点和下一步建议。
+<!-- README-I18N:START -->
 
-暂不包含审批、外部通知、飞书、质量门禁循环、跨平台适配和复杂发布流程。
+**简体中文** | [English](./README.en.md)
 
-## 协作模型
+<!-- README-I18N:END -->
 
-```text
-老板：用户
-主管：delivery-manager
-员工：product-manager / ui-designer / frontend-impl / backend-impl / qa-tester
-账本：.codex/delivery-workflow/workflow.sqlite3（只放结构化状态和路径）
-产物：docs/delivery/
-记忆：.codex/delivery-workflow/memory/
+`codex-delivery-workflow` 是一个为 Codex 设计的轻量多 Agent 软件交付插件。用户是老板，`delivery-manager` 是主管，产品、UI、前端、后端和 QA 是可直接 `@` 的项目级员工。主管能根据自然语言和当前状态主动调度员工，SQLite 负责跨会话状态，文件负责保存完整产物。
+
+> [!TIP]
+> 不需要搭建独立平台，也不依赖外部服务。安装插件、初始化项目、重启一次 Codex，就可以输入 `@delivery-manager 实现一个会员积分兑换需求` 开始工作。
+
+如果这个项目对你的 Codex 工作流有帮助，欢迎点一个 Star，让更多人看到它。
+
+## 为什么需要它
+
+普通多 Agent 对话很容易在会话切换后丢失状态，也容易出现主管越权写 PRD、员工重复领取任务、产物只存在聊天记录里的问题。这个插件把协作拆成三个稳定层次：
+
+- **Codex 原生 Agent**：初始化后写入 `.codex/agents/` 和 `.codex/config.toml`，既能被用户直接 `@product-manager`，也能被主管以同名 `agent_type` 调度。
+- **可恢复的流程状态**：SQLite 只保存 run、job、版本、路径和短摘要，完整内容落盘，兼顾稳定性和 token 消耗。
+- **可交付的文件产物**：PRD、设计规范、前后端结果和测试报告统一进入 `docs/delivery/`，不把聊天历史当作最终交付物。
+
+## 功能亮点
+
+- **1 名主管 + 5 名专业 Agent**：产品、UI、前端、后端、QA 各守职责边界，主管只调度、归纳和推动决策。
+- **直接 `@agent` 或自动调度**：老板可以直接找员工，也可以只说“继续下一步”，由主管结合 pending job 主动 `spawn_agent`。
+- **PRD 人工确认与多角色评审**：V1 先交老板确认；不满意时由 UI、前端、后端、QA 并行评审，产品经理整合为 V2/V3。
+- **跨会话共享状态与角色记忆**：所有 Agent 共享同一份状态账本；同名 Agent 的显式 `@` 实例和主管调度实例共享同一个 memory 文件。
+- **版本化产物归档**：每个 run 的需求、PRD、设计、实现和 QA 结果按 Agent、类别和版本保存，随时可以追溯。
+- **项目隔离**：每个业务项目拥有自己的 Agent 配置、SQLite、memory 和产物目录，不污染其他项目。
+- **零第三方 Python 依赖**：MCP Server 和工作流内核仅使用 Python 标准库，安装面和维护成本都很小。
+
+## Agent 团队
+
+| 角色 | 身份 | 主要职责 |
+| --- | --- | --- |
+| 老板 | 用户 | 提出目标、直接点名 Agent、确认 PRD、决定是否继续评审 |
+| 主管 | `delivery-manager` | 创建 run、调度员工、读取状态、归纳产物、暴露阻塞点 |
+| 产品经理 | `product-manager` | 把原始需求整理成可设计、可开发、可测试的 PRD |
+| UI 设计师 | `ui-designer` | 输出页面结构、布局、组件、状态和交互规范 |
+| 前端工程师 | `frontend-impl` | 完成前端实现、状态处理、联调点和自测说明 |
+| 后端工程师 | `backend-impl` | 完成接口、领域模型、数据结构、权限和错误处理 |
+| QA 工程师 | `qa-tester` | 生成并执行测试范围、用例、问题清单和准入建议 |
+
+## 快速开始
+
+### 1. 添加 Marketplace 并安装插件
+
+```bash
+codex plugin marketplace add devTech-zhang/multi-agent-delivery-workflow --ref main
+codex plugin add codex-delivery-workflow@devTech-Zhang
 ```
 
-老板可以这样使用：
+已经添加过 Marketplace 时，更新并重装插件：
+
+```bash
+codex plugin marketplace upgrade devTech-Zhang
+codex plugin remove codex-delivery-workflow@devTech-Zhang
+codex plugin add codex-delivery-workflow@devTech-Zhang
+```
+
+### 2. 在目标项目中初始化
+
+```bash
+cd /path/to/your-project
+codex
+```
+
+在 Codex 中输入：
+
+```text
+初始化 Codex 交付工作流
+```
+
+初始化会创建项目级 Agent、注册配置、状态账本、角色记忆和产物目录。请信任当前项目，然后完全重启或新开 Codex 会话，让 `@` 菜单和 `spawn_agent` role registry 重新加载。
+
+### 3. 交给主管推进
 
 ```text
 @delivery-manager 实现一个会员积分兑换需求
-@product-manager 这个 PRD 再补一下异常流程
-@ui-designer 评审下这个 PRD 的交互风险
-@backend-impl 看下数据模型和接口风险
 ```
 
-## 初始化后的项目结构
+也可以直接找某个专业 Agent：
+
+```text
+@product-manager 把当前需求补充成可验收的 PRD
+@ui-designer 评审当前 PRD 的交互风险
+@backend-impl 检查数据模型和接口边界
+@qa-tester 根据最新 PRD 补充异常场景用例
+```
+
+## 工作流
+
+```mermaid
+flowchart TD
+    O["老板提出需求"] --> M["delivery-manager 创建 run"]
+    M --> P["product-manager 输出 PRD V1"]
+    P --> R{"老板确认?"}
+    R -- "要求评审" --> C["UI / 前端 / 后端 / QA 并行评审"]
+    C --> V["product-manager 整合 V2 / V3"]
+    V --> R
+    R -- "确认" --> U["ui-designer"]
+    U --> F["frontend-impl"]
+    F --> B["backend-impl"]
+    B --> Q["qa-tester"]
+    Q --> S["delivery-manager 汇总交付结果"]
+```
+
+主管不会代替员工产出专业内容。老板已显式 `@agent` 时，主管不重复调度；老板只说“继续下一步”时，主管会读取当前 run 和 pending job，再调用对应的自定义 Agent。
+
+## 状态、记忆与产物
+
+初始化后的项目结构：
 
 ```text
 .codex/
@@ -61,96 +154,36 @@ docs/
 workflow.config.json
 ```
 
-插件仓库里的 `agents/*.toml` 是项目级 Agent 模板源。init 会把模板写入业务项目的 `.codex/agents/`，同时 merge/create `.codex/config.toml`：
+| 存储 | 保存内容 | 设计目的 |
+| --- | --- | --- |
+| `workflow.sqlite3` | project、run、job、step、artifact、review、event、memory 索引 | 稳定流转、并发领取、跨会话恢复 |
+| `memory/<agent>.md` | 角色结论、产物路径、未决问题、下一步 | 让同名 Agent 实例共享长期上下文 |
+| `docs/delivery/` | PRD、设计规范、实现结果、QA 报告 | 保存完整、可版本化、可审阅的交付物 |
 
-```toml
-[features]
-multi_agent = true
-
-[agents]
-max_threads = 6
-max_depth = 1
-
-[agents."product-manager"]
-description = "产品经理 Agent。负责把用户原始需求转成可交付 PRD，明确目标、范围、流程、验收标准、依赖和风险。"
-config_file = "agents/product-manager.toml"
-nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]
-```
-
-`config_file` 路径相对 `.codex/config.toml`，所以写 `agents/product-manager.toml`。这层配置用于让 Codex 的 `spawn_agent` role registry 稳定识别 `product-manager` 等自定义 Agent；`.codex/agents/*.toml` 里的 `name` 仍然是该 Agent 的真实身份。TOML 不设置 `agent_type`。
-
-`description` 和 `developer_instructions` 保持中文，便于 Agent 理解和输出；`nickname_candidates` 必须使用英文 ASCII，中文昵称会导致 Codex Agent 加载或注册异常。
-
-初始化后要信任当前项目，并完全重启或新开 Codex 会话，新的 `@` 菜单和 `spawn_agent(agent_type="product-manager")` 类型注册才会刷新。
-
-已有项目再次执行 init 时，会自动移除旧版生成的 `agent_type = "worker"` 或 `explorer`，并把旧版默认昵称或中文昵称迁移为英文；项目自行修改的英文 Agent 昵称不会被覆盖。已有 `.codex/config.toml` 也不会整文件覆盖，只会写入/校正 `features.multi_agent`，在缺失时补 `agents.max_threads`、`agents.max_depth`，并补齐各 workflow Agent 的 `config_file`、`description`、`nickname_candidates` 注册项；已有的 model、features、其他 Agent、已有 `max_threads`、同名 Agent 的自定义 description 和英文 nickname 会保留。
-
-`workflow/codex-delivery-workflow.toml` 中每个步骤的中文 `name` 只是展示名，例如“产品需求整理 V1”；真正关联 Agent 的字段是 `agent = "product-manager"`。中文展示名不会影响 `@product-manager` 或 `spawn_agent(agent_type="product-manager")` 的调度。
-
-## 主流程
-
-```text
-老板提出需求
--> delivery-manager 创建 run
--> 老板显式 @product-manager 时直接命中原生项目 Agent
--> 否则 delivery-manager 主动 spawn product-manager 自定义 Agent
--> product-manager 领取任务并输出 PRD V1
--> delivery-manager 汇总 V1 给老板
--> 老板确认 PRD 或要求多 Agent 评审
-```
-
-老板确认 PRD 后进入交付链路：
-
-```text
-ui-designer
--> frontend-impl
--> backend-impl
--> qa-tester
--> delivery-manager 汇总最终状态和产物
-```
-
-老板要求评审时进入循环：
-
-```text
-ui-designer / frontend-impl / backend-impl / qa-tester 并行评审最新 PRD
--> delivery-manager 并行 spawn 对应自定义 Agent；老板也可以显式 @ 其中任一角色
--> product-manager 整合意见输出下一版 PRD
--> delivery-manager 再次归纳给老板
--> 老板确认或继续评审
-```
+> [!NOTE]
+> `description` 和 `developer_instructions` 可以使用中文；`nickname_candidates` 必须使用英文 ASCII，否则 Codex 可能无法加载或注册 Agent。
 
 ## MCP 工具
 
-```text
-codex_delivery_workflow_init
-codex_delivery_workflow_init_project
-codex_delivery_workflow_create
-codex_delivery_workflow_status
-codex_delivery_workflow_prepare_handoff
-codex_delivery_workflow_dispatch_next
-codex_delivery_workflow_complete_agent_step
-codex_delivery_workflow_manager_summary
-codex_delivery_workflow_confirm_prd
-codex_delivery_workflow_request_prd_review
-codex_delivery_workflow_list_artifacts
-codex_delivery_workflow_read_artifact
-codex_delivery_workflow_inspect
-```
+| 意图 | 工具 |
+| --- | --- |
+| 初始化项目 | `codex_delivery_workflow_init_project` |
+| 创建大任务 | `codex_delivery_workflow_create` |
+| 查询状态 | `codex_delivery_workflow_status` |
+| 准备 Agent 任务包 | `codex_delivery_workflow_prepare_handoff` |
+| 领取待办 | `codex_delivery_workflow_dispatch_next` |
+| 回填产物 | `codex_delivery_workflow_complete_agent_step` |
+| 主管汇总 | `codex_delivery_workflow_manager_summary` |
+| 确认 PRD | `codex_delivery_workflow_confirm_prd` |
+| 发起多 Agent 评审 | `codex_delivery_workflow_request_prd_review` |
+| 列出或读取产物 | `codex_delivery_workflow_list_artifacts` / `codex_delivery_workflow_read_artifact` |
+| 查看工作流定义 | `codex_delivery_workflow_inspect` |
 
-## 主管执行约定
+MCP 工具支持显式传入 `project_root`，因此即使 Server 从插件缓存目录启动，也会把状态和产物写入当前 Codex 项目，而不是插件目录。
 
-`delivery-manager` 不亲自写 PRD、设计、前端、后端或 QA 报告。它只做调度和归纳：
+## 本地开发与验证
 
-1. 创建或读取 run。
-2. 调用 `codex_delivery_workflow_prepare_handoff` 准备对应 Agent 的任务包。
-3. 老板已显式 `@agent` 时不重复调度；否则调用 `spawn_agent(agent_type="<agent-name>", message="<任务包>")`。
-4. 调用时不要传 `model` 或 `reasoning_effort`，由项目 Agent TOML 决定模型、思考等级和昵称。
-5. 等待员工自行领取、执行和回填，再读取状态与 Agent memory。
-6. 汇总当前状态、产物路径、阻塞点和下一步。
-
-员工被老板直接 `@` 时，使用 `invocation_mode="explicit_at"` 领取；被主管 spawn 时，使用 `invocation_mode="manager_spawn"` 领取。两者是不同运行实例，但按同一个 `agent_name` 读取和更新 `.codex/delivery-workflow/memory/<agent-name>.md`。同一 job 的领取是原子的，后到的实例不会重复执行。若没有待办，要说明当前状态并建议由 `@delivery-manager` 创建任务或准备调度。
-
-## 本地命令
+要求 Python 3.11 或更高版本，无第三方依赖。
 
 ```bash
 python3 -m delivery_workflow.cli config init
@@ -160,12 +193,12 @@ python3 -m delivery_workflow.cli project create \
 python3 -m delivery_workflow.cli project status
 ```
 
-本地命令只用于初始化、排障和查看状态。日常协作以 Codex 当前会话中的主管、员工 Agent 和 MCP 工具为准。
-
-## 验证
-
 ```bash
 python3 -m unittest tests.test_core
-python3 -m compileall delivery_workflow
+python3 -m compileall -q delivery_workflow
 git diff --check
 ```
+
+## 当前范围
+
+当前版本专注验证 Codex 内的轻量多 Agent 交付闭环：项目级 Agent、主管调度、PRD 评审、薄状态账本、共享记忆和文件产物。暂不包含飞书、外部审批、跨平台适配、复杂发布流水线和无人值守的全自动上线。
