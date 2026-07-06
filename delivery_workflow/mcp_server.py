@@ -35,7 +35,7 @@ TOOLS = [
     },
     {
         "name": "codex_delivery_workflow_create",
-        "description": "创建一次 Codex 交付工作流运行，并准备第一个 @ 子 Agent 交接指令。",
+        "description": "创建一次 Codex 交付工作流运行，并准备第一个自定义 Agent 的调用任务。",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -55,13 +55,20 @@ TOOLS = [
     },
     {
         "name": "codex_delivery_workflow_prepare_handoff",
-        "description": "主管 Agent 使用：为下一个 pending job 生成 @ 子 Agent 交接指令，但不领取任务、不修改 running 状态。",
+        "description": "主管 Agent 使用：为下一个 pending job 生成自定义 Agent 的 spawn 或显式 @ 调用任务，但不领取任务。",
         "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "agent": {"type": "string"}}},
     },
     {
         "name": "codex_delivery_workflow_dispatch_next",
-        "description": "被 @ 的项目级子 Agent 使用：领取自己的 pending job，返回 task_message 和输出契约。",
-        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "agent": {"type": "string"}}},
+        "description": "自定义项目 Agent 使用：领取自己的 pending job，支持显式 @ 和主管 spawn 两种调用来源。",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+                "agent": {"type": "string"},
+                "invocation_mode": {"type": "string", "enum": ["explicit_at", "manager_spawn"]},
+            },
+        },
     },
     {
         "name": "codex_delivery_workflow_complete_agent_step",
@@ -164,7 +171,11 @@ def _call_tool(name: str, args: dict[str, Any]) -> Any:
     if name == "codex_delivery_workflow_prepare_handoff":
         return prepare_agent_handoff(run_id=args.get("run_id"), agent=args.get("agent"))
     if name == "codex_delivery_workflow_dispatch_next":
-        return dispatch_next_agent_task(run_id=args.get("run_id"), agent=args.get("agent"))
+        return dispatch_next_agent_task(
+            run_id=args.get("run_id"),
+            agent=args.get("agent"),
+            invocation_mode=args.get("invocation_mode", "explicit_at"),
+        )
     if name == "codex_delivery_workflow_complete_agent_step":
         return complete_agent_step(
             run_id=args["run_id"],

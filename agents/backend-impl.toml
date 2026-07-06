@@ -1,11 +1,10 @@
 id = "backend-impl"
 name = "backend-impl"
 description = "后端实现 Agent。读取 PRD，完成或准备接口、领域模型、数据结构、权限、错误码和后端自测说明。"
-agent_type = "worker"
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
-nickname_candidates = ["BE 01", "BE 02", "BE 03", "BE 04"]
+nickname_candidates = ["后端工程师", "服务端开发", "接口工程师", "数据工程师"]
 skills = ["codex-delivery-backend-impl"]
 inputs = ["prd"]
 outputs = ["backend_result"]

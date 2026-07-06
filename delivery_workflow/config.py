@@ -17,6 +17,15 @@ MANAGER_AGENT_ID = "delivery-manager"
 CHILD_AGENT_IDS = ["product-manager", "ui-designer", "frontend-impl", "backend-impl", "qa-tester"]
 PROJECT_AGENT_IDS = [MANAGER_AGENT_ID, *CHILD_AGENT_IDS]
 
+LEGACY_NICKNAME_CANDIDATES = {
+    "delivery-manager": ["主管", "Manager", "交付主管", "Delivery Manager"],
+    "product-manager": ["PM 01", "PM 02", "PM 03", "PM 04"],
+    "ui-designer": ["UI 01", "UI 02", "UI 03", "UI 04"],
+    "frontend-impl": ["FE 01", "FE 02", "FE 03", "FE 04"],
+    "backend-impl": ["BE 01", "BE 02", "BE 03", "BE 04"],
+    "qa-tester": ["QA 01", "QA 02", "QA 03", "QA 04"],
+}
+
 DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
     "storage": {
         "home": PROJECT_WORKFLOW_DIR,
@@ -103,7 +112,13 @@ def materialize_project_agents(*, overwrite: bool = False) -> list[dict[str, Any
     for agent_id in PROJECT_AGENT_IDS:
         target = agent_dir / f"{agent_id}.toml"
         if target.exists() and not overwrite:
-            written.append({"agent": agent_id, "path": str(target), "status": "exists"})
+            current = target.read_text(encoding="utf-8")
+            migrated = _migrate_existing_project_agent(current, agent_id)
+            if migrated != current:
+                target.write_text(migrated, encoding="utf-8")
+                written.append({"agent": agent_id, "path": str(target), "status": "migrated"})
+            else:
+                written.append({"agent": agent_id, "path": str(target), "status": "exists"})
             continue
         target.write_text(_project_agent_toml(agent_id), encoding="utf-8")
         written.append({"agent": agent_id, "path": str(target), "status": "written"})
@@ -162,7 +177,6 @@ def _project_agent_toml(agent_id: str) -> str:
     fields = {
         "name": profile["name"],
         "description": profile["description"],
-        "agent_type": profile.get("agent_type", "worker"),
         "model": profile.get("model", "gpt-5"),
         "model_reasoning_effort": profile.get("model_reasoning_effort", "high"),
         "sandbox_mode": profile.get("sandbox_mode", "workspace-write"),
@@ -183,22 +197,21 @@ def _load_template_agent(agent_id: str) -> dict[str, Any]:
 def _manager_profile() -> dict[str, Any]:
     return {
         "name": MANAGER_AGENT_ID,
-        "description": "交付主管 Agent。负责创建任务、准备 @ 子 Agent 交接指令、维护 SQLite 薄状态账本、汇总产物、处理 PRD 审核和多 Agent 评审循环。",
-        "agent_type": "worker",
+        "description": "交付主管 Agent。负责创建任务、按语义调度自定义子 Agent、维护 SQLite 薄状态账本、汇总产物、处理 PRD 审核和多 Agent 评审循环。",
         "model": "gpt-5.5",
         "model_reasoning_effort": "medium",
         "sandbox_mode": "workspace-write",
-        "nickname_candidates": ["主管", "Manager", "交付主管", "Delivery Manager"],
+        "nickname_candidates": ["交付主管", "项目主管", "交付经理", "研发协调"],
         "developer_instructions": """
 你是 delivery-manager，当前项目的交付主管 Agent。
 
 职责边界：
 - 你代表用户管理 codex-delivery-workflow，不亲自写 PRD、设计、前端、后端或 QA 报告。
-- 你负责调用 MCP 工具创建任务、准备 @ 子 Agent 交接指令、回收产物、更新 SQLite 薄状态账本、总结状态和给出下一步建议。
-- 老板说“实现一个需求”或“创建一个项目”时，先确认当前项目已初始化，然后创建 workflow run，并生成 @product-manager 交接指令，让 product-manager 自行领取 pending job 后输出 PRD V1。
+- 你负责调用 MCP 工具创建任务、按语义和项目状态调度子 Agent、回收产物、更新 SQLite 薄状态账本、总结状态和给出下一步建议。
+- 老板说“实现一个需求”或“创建一个项目”时，先确认当前项目已初始化，然后创建 workflow run；如果老板没有显式 @ 员工，主动 spawn product-manager，让它自行领取 pending job 后输出 PRD V1。
 - PRD V1 完成后必须先向老板归纳：产物路径、核心范围、风险、待确认问题和可选下一步。
 - 老板确认 PRD 后，调用确认工具继续 UI、前端、后端、QA。
-- 老板要求“多角色/agent 评审”时，调用评审工具入队 ui-designer、frontend-impl、backend-impl、qa-tester 共同评审最新 PRD，再逐个生成交接指令；评审完成后生成 @product-manager 交接指令整合下一版 PRD。
+- 老板要求“多角色/agent 评审”时，调用评审工具入队 ui-designer、frontend-impl、backend-impl、qa-tester 共同评审最新 PRD，再按 name 并行 spawn 对应自定义 Agent；评审完成后 spawn product-manager 整合下一版 PRD。
 
 工作原则：
 - 所有状态以 SQLite 为准，不用聊天上下文替代账本。
@@ -206,7 +219,11 @@ def _manager_profile() -> dict[str, Any]:
 - 每次处理前读取 manager_summary 或 status。
 - 每次处理后输出中文总结，说明当前状态、已产物、待办、需要老板决策的点。
 - 如果老板直接 @ 子 Agent 处理过任务，你需要从 SQLite、events、artifacts 和该 Agent memory 中恢复上下文。
-- 不直接代替子 Agent 执行专业任务；你的交付动作是准备交接、提醒老板或当前会话使用 `@agent-name`、再读取账本归纳结果。
+- 不直接代替子 Agent 执行专业任务；你的交付动作是准备任务包、调度自定义 Agent、再读取账本归纳结果。
+- 老板显式 `@product-manager` 等员工时，由原生项目 Agent 直接处理，你不要重复 spawn。
+- 老板说“继续下一步”“你继续”“往下走”且存在员工 pending job 时，调用 `spawn_agent(agent_type="<agent-name>", message="<任务包>")` 主动调度对应 Agent。
+- 调用自定义 Agent 时不要传 `model` 或 `reasoning_effort`，让 Codex 使用 `.codex/agents/<agent-name>.toml` 中的模型、思考等级和昵称配置。
+- 主管不能自己领取员工 job 或伪造员工产物；被 spawn 或显式 @ 的员工 Agent 必须自行领取并回填。
 """,
     }
 
@@ -216,18 +233,53 @@ def _project_agent_instructions(agent_id: str, profile: dict[str, Any]) -> str:
     if agent_id == MANAGER_AGENT_ID:
         original = str(profile["developer_instructions"]).strip()
         role_line = "你是项目级交付主管。"
+        invocation_line = "你不要递归调用 delivery-manager；应根据 pending job 调用对应员工 name 的自定义 Agent。"
     else:
         role_line = f"你是项目级 {agent_id}。"
+        invocation_line = (
+            f'delivery-manager 也可以通过 `spawn_agent(agent_type="{agent_id}", message="<任务包>")` '
+            "调用同一角色配置；两种调用方式共享同一份角色记忆。"
+        )
     return f"""{original}
 
 项目级协作补充：
 - {role_line} 你已通过当前项目的 `.codex/agents/{agent_id}.toml` 被 Codex 识别，老板可以直接通过 `@{agent_id}` 找你。
+- {invocation_line}
 - 当前项目的共享账本位于 `.codex/delivery-workflow/workflow.sqlite3`，共享产物位于 `docs/delivery/`，你的记忆文件位于 `.codex/delivery-workflow/memory/{agent_id}.md`。
 - 每次开始工作前，先通过 codex-delivery-workflow MCP 工具读取当前状态；如果你是员工 Agent，优先领取属于自己的 pending job。
 - 每次完成工作后，必须通过 MCP 工具回填结果或提醒 delivery-manager 回填，不能只在聊天里说“完成”。
 - 完成后更新自己的记忆文件，记录本次产物路径、关键结论、未决问题和下次继续时需要读取的上下文。
 - 如果老板直接点名你做临时评审或补充，但当前没有你的 pending job，要先说明当前账本状态，并建议由 `@delivery-manager` 创建任务或准备交接。
 """
+
+
+def _remove_legacy_agent_type(content: str) -> str:
+    return "".join(
+        line
+        for line in content.splitlines(keepends=True)
+        if line.split("=", 1)[0].strip() != "agent_type"
+    )
+
+
+def _migrate_existing_project_agent(content: str, agent_id: str) -> str:
+    migrated = _remove_legacy_agent_type(content)
+    try:
+        existing = tomllib.loads(migrated)
+    except tomllib.TOMLDecodeError:
+        return migrated
+    if existing.get("nickname_candidates") != LEGACY_NICKNAME_CANDIDATES.get(agent_id):
+        return migrated
+    profile = _manager_profile() if agent_id == MANAGER_AGENT_ID else _load_template_agent(agent_id)
+    nicknames = profile.get("nickname_candidates", [])
+    rendered = ", ".join(json.dumps(item, ensure_ascii=False) for item in nicknames)
+    lines: list[str] = []
+    for line in migrated.splitlines(keepends=True):
+        if line.split("=", 1)[0].strip() == "nickname_candidates":
+            suffix = "\n" if line.endswith("\n") else ""
+            lines.append(f"nickname_candidates = [{rendered}]{suffix}")
+        else:
+            lines.append(line)
+    return "".join(lines)
 
 
 def _dump_toml(values: dict[str, Any]) -> str:

@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   result_json TEXT,
   error TEXT,
   attempts INTEGER DEFAULT 0,
+  claimed_agent TEXT,
+  invocation_mode TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   started_at TEXT,
@@ -157,6 +159,8 @@ def init_db() -> Path:
 def _migrate_schema(conn: sqlite3.Connection) -> None:
     _add_column(conn, "workflow_runs", "prd_version", "INTEGER DEFAULT 0")
     _add_column(conn, "workflow_runs", "review_round", "INTEGER DEFAULT 0")
+    _add_column(conn, "jobs", "claimed_agent", "TEXT")
+    _add_column(conn, "jobs", "invocation_mode", "TEXT")
 
 
 def _add_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:

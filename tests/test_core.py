@@ -9,7 +9,13 @@ from copy import deepcopy
 from pathlib import Path
 
 from delivery_workflow import engine
-from delivery_workflow.config import DEFAULT_CONFIG_TEMPLATE, WORKSPACE_CONFIG_NAME, initialize_project_workspace, load_config
+from delivery_workflow.config import (
+    DEFAULT_CONFIG_TEMPLATE,
+    WORKSPACE_CONFIG_NAME,
+    initialize_project_workspace,
+    load_config,
+    materialize_project_agents,
+)
 from delivery_workflow.definitions import load_workflow
 from delivery_workflow.engine import confirm_prd, create_project, read_artifact, request_prd_review, status
 from delivery_workflow.mcp_server import TOOLS
@@ -96,6 +102,8 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(workflow.name, "Codex 交付工作流")
         self.assertEqual([step["id"] for step in steps], WORKFLOW_AGENTS)
         self.assertEqual([step["agent"] for step in steps], WORKFLOW_AGENTS)
+        self.assertTrue(all(_has_cjk(step["name"]) for step in steps))
+        self.assertTrue(all(step["name"] != step["agent"] for step in steps))
         self.assertTrue(all(step["executor"] == "agent" for step in steps))
         self.assertNotIn("lark-doc", {step["executor"] for step in steps})
         self.assertNotIn("gate", {step["executor"] for step in steps})
@@ -112,11 +120,13 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             path = agent_dir / f"{agent}.toml"
             profile = tomllib.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(profile["id"], agent)
-            self.assertIn(profile["agent_type"], {"worker", "explorer"})
+            self.assertNotIn("agent_type", profile)
             self.assertEqual(profile["model"], "gpt-5.5")
             self.assertEqual(profile["model_reasoning_effort"], EXPECTED_AGENT_REASONING[agent])
             self.assertEqual(profile["sandbox_mode"], "workspace-write")
             self.assertGreaterEqual(len(profile["nickname_candidates"]), 3)
+            self.assertTrue(all(_has_cjk(nickname) for nickname in profile["nickname_candidates"]))
+            self.assertFalse(any(any(char.isdigit() for char in nickname) for nickname in profile["nickname_candidates"]))
             self.assertEqual(profile["skills"], EXPECTED_AGENT_SKILLS[agent])
             self.assertGreater(len(profile["developer_instructions"]), 800)
             for required in ("职责边界", "规范来源", "交付要求"):
@@ -187,7 +197,30 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         project_agent = tomllib.loads((Path(".codex") / "agents" / "product-manager.toml").read_text(encoding="utf-8"))
         self.assertEqual(project_agent["name"], "product-manager")
         self.assertNotIn("id", project_agent)
+        self.assertNotIn("agent_type", project_agent)
         self.assertIn("老板可以直接通过 `@product-manager` 找你", project_agent["developer_instructions"])
+        self.assertIn('spawn_agent(agent_type="product-manager"', project_agent["developer_instructions"])
+        manager_agent = tomllib.loads((Path(".codex") / "agents" / "delivery-manager.toml").read_text(encoding="utf-8"))
+        self.assertNotIn('spawn_agent(agent_type="delivery-manager"', manager_agent["developer_instructions"])
+
+    def test_existing_project_agent_removes_legacy_agent_type_without_overwriting_other_content(self) -> None:
+        agent_dir = Path(".codex/agents")
+        agent_dir.mkdir(parents=True)
+        target = agent_dir / "product-manager.toml"
+        target.write_text(
+            'name = "product-manager"\nagent_type = "worker"\n'
+            'nickname_candidates = ["PM 01", "PM 02", "PM 03", "PM 04"]\n'
+            'description = "保留项目自定义描述"\n',
+            encoding="utf-8",
+        )
+
+        result = materialize_project_agents(overwrite=False)
+
+        migrated = target.read_text(encoding="utf-8")
+        self.assertNotIn("agent_type", migrated)
+        self.assertIn("保留项目自定义描述", migrated)
+        self.assertIn('nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]', migrated)
+        self.assertEqual(next(item["status"] for item in result if item["agent"] == "product-manager"), "migrated")
 
     def test_no_claude_code_config_or_old_codex_workflow_name_remains(self) -> None:
         self.assertFalse((ROOT / ".claude").exists())
@@ -198,13 +231,13 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertFalse((ROOT / "skills" / "codex-workflow").exists())
         self.assertFalse((ROOT / "codex-workflow.config.json").exists())
 
-    def test_create_project_prepares_native_agent_handoff_without_claiming_job(self) -> None:
+    def test_create_project_prepares_custom_agent_spawn_without_claiming_job(self) -> None:
         created = create_project(requirement="做一个极简 TODO Web 应用", title="TODO Web")
         run_id = created["run_id"]
 
         current = status(run_id)
         self.assertEqual(current["run"]["workflow_id"], PLUGIN_NAME)
-        self.assertEqual(created["execution_policy"]["mode"], "native_agent_handoff")
+        self.assertEqual(created["execution_policy"]["mode"], "custom_agent_spawn")
         self.assertNotIn("enable_agent_cli", created["execution_policy"])
         handoff = created["next_handoff"]
         self.assertTrue(handoff["ok"])
@@ -212,14 +245,17 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(handoff["run_id"], run_id)
         self.assertEqual(handoff["step_id"], "product-manager")
         self.assertEqual(handoff["agent"], "product-manager")
+        self.assertEqual(handoff["agent_type"], "product-manager")
         self.assertEqual(handoff["mention"], "@product-manager")
+        self.assertTrue(handoff["auto_spawn_allowed"])
+        self.assertEqual(handoff["manager_next_action"], "spawn_custom_agent")
         self.assertEqual(handoff["claim_tool"], "codex_delivery_workflow_dispatch_next")
         self.assertEqual(handoff["complete_tool"], "codex_delivery_workflow_complete_agent_step")
         self.assertIn("@product-manager", handoff["handoff_message"])
         self.assertIn("codex_delivery_workflow_dispatch_next", handoff["handoff_message"])
+        self.assertIn('spawn_agent(agent_type="product-manager"', handoff["handoff_message"])
         self.assertIn(run_id, handoff["handoff_message"])
         self.assertNotIn("runtime", handoff)
-        self.assertNotIn("spawn_agent", json.dumps(handoff, ensure_ascii=False))
         self.assertEqual(current["run"]["status"], "prd_draft")
         self.assertEqual(current["run"]["current_step"], "product-manager")
         self.assertEqual(current["run"]["prd_version"], 0)
@@ -238,19 +274,19 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         still_pending = status(run_id)
         self.assertEqual(still_pending["jobs"][0]["status"], "pending")
         self.assertEqual(still_pending["step_runs"], [])
-        dispatch = engine.dispatch_next_agent_task(run_id=run_id, agent="product-manager")
+        dispatch = engine.dispatch_next_agent_task(run_id=run_id, agent="product-manager", invocation_mode="manager_spawn")
         self.assertTrue(dispatch["ok"])
         self.assertFalse(dispatch["idle"])
         self.assertEqual(dispatch["run_id"], run_id)
         self.assertEqual(dispatch["step_id"], "product-manager")
         self.assertEqual(dispatch["agent"], "product-manager")
-        self.assertEqual(dispatch["agent_type"], "worker")
+        self.assertEqual(dispatch["agent_type"], "product-manager")
         self.assertEqual(dispatch["model"], "gpt-5.5")
         self.assertEqual(dispatch["model_reasoning_effort"], "high")
         self.assertEqual(dispatch["skills"], ["codex-delivery-prd"])
-        self.assertEqual(dispatch["claim_mode"], "native_project_agent")
+        self.assertEqual(dispatch["claim_mode"], "custom_project_agent")
+        self.assertEqual(dispatch["invocation_mode"], "manager_spawn")
         self.assertNotIn("runtime", dispatch)
-        self.assertNotIn("spawn_agent", json.dumps(dispatch, ensure_ascii=False))
         self.assertIn("product-manager", dispatch["task_message"])
         self.assertIn("做一个极简 TODO Web 应用", dispatch["task_message"])
         self.assertIn("PRD V1", dispatch["task_message"])
@@ -259,8 +295,63 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
 
         after_dispatch = status(run_id)
         self.assertEqual(after_dispatch["jobs"][0]["status"], "running")
+        self.assertEqual(after_dispatch["jobs"][0]["claimed_agent"], "product-manager")
+        self.assertEqual(after_dispatch["jobs"][0]["invocation_mode"], "manager_spawn")
+        self.assertEqual(after_dispatch["jobs"][0]["attempts"], 1)
         self.assertEqual(after_dispatch["step_runs"][0]["step_id"], "product-manager")
         self.assertEqual(after_dispatch["step_runs"][0]["status"], "running")
+
+        duplicate = engine.dispatch_next_agent_task(run_id=run_id, agent="product-manager", invocation_mode="explicit_at")
+        self.assertTrue(duplicate["idle"])
+        self.assertEqual(status(run_id)["jobs"][0]["attempts"], 1)
+
+    def test_manager_continue_next_step_spawns_named_custom_agent(self) -> None:
+        created = create_project(requirement="做一个极简 TODO Web 应用", title="TODO Web")
+        run_id = created["run_id"]
+        handoff = created["next_handoff"]
+
+        self.assertTrue(handoff["auto_spawn_allowed"])
+        self.assertEqual(handoff["manager_next_action"], "spawn_custom_agent")
+        self.assertIn('spawn_agent(agent_type="product-manager"', handoff["handoff_message"])
+        self.assertIn("不要传 model 或 reasoning_effort", handoff["handoff_message"])
+        self.assertIn("继续下一步", handoff["handoff_message"])
+        self.assertIn("@product-manager", handoff["handoff_message"])
+
+        task_package = read_artifact(run_id, "product-manager_agent_task")["content"]
+        self.assertIn("@product-manager", task_package)
+        self.assertIn('spawn_agent(agent_type="product-manager"', task_package)
+        self.assertIn("只有 product-manager 类型的 Agent", task_package)
+
+        skill = (ROOT / "skills" / PLUGIN_NAME / "SKILL.md").read_text(encoding="utf-8")
+        manager = (ROOT / "agents" / "delivery-manager.toml").read_text(encoding="utf-8")
+        for text in (skill, manager):
+            self.assertIn("老板说“继续下一步”", text)
+            self.assertIn('spawn_agent(agent_type="<agent-name>"', text)
+            self.assertIn("不要传 `model` 或 `reasoning_effort`", text)
+
+    def test_explicit_at_and_manager_spawn_share_memory_by_agent_name(self) -> None:
+        first = create_project(requirement="第一个产品需求", title="需求一")
+        first_dispatch = engine.dispatch_next_agent_task(
+            run_id=first["run_id"], agent="product-manager", invocation_mode="manager_spawn"
+        )
+        engine.complete_agent_step(run_id=first["run_id"], job_id=first_dispatch["job_id"], output="# PRD 一\n")
+
+        second = create_project(requirement="第二个产品需求", title="需求二")
+        second_dispatch = engine.dispatch_next_agent_task(
+            run_id=second["run_id"], agent="product-manager", invocation_mode="explicit_at"
+        )
+        engine.complete_agent_step(run_id=second["run_id"], job_id=second_dispatch["job_id"], output="# PRD 二\n")
+
+        memory_path = Path(".codex/delivery-workflow/memory/product-manager.md")
+        memory_text = memory_path.read_text(encoding="utf-8")
+        self.assertIn(first["run_id"], memory_text)
+        self.assertIn(second["run_id"], memory_text)
+        first_memory = status(first["run_id"])["agent_memory"]
+        second_memory = status(second["run_id"])["agent_memory"]
+        self.assertEqual(
+            next(item["memory_path"] for item in first_memory if item["agent_name"] == "product-manager"),
+            next(item["memory_path"] for item in second_memory if item["agent_name"] == "product-manager"),
+        )
 
     def test_status_and_manager_summary_keep_large_text_out_of_sqlite_payloads(self) -> None:
         unique_marker = "LONG_REQUIREMENT_MARKER_7f65b2b8"
@@ -447,7 +538,8 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             "host_hook",
             "worker_daemon",
             "runtime_subagent",
-            "spawn_agent",
+            "stop_and_ask_owner_to_at_agent",
+            "只能重新输出交接指令",
         ]:
             self.assertNotIn(forbidden, combined)
 

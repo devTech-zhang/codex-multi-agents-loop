@@ -1,11 +1,10 @@
 id = "ui-designer"
 name = "ui-designer"
 description = "UI 设计 Agent。基于 PRD 输出可执行的 DESIGN.md 风格规范，明确页面结构、布局、组件、状态、响应式和实现约束。"
-agent_type = "explorer"
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
-nickname_candidates = ["UI 01", "UI 02", "UI 03", "UI 04"]
+nickname_candidates = ["UI 设计师", "交互设计师", "产品设计师", "视觉设计师"]
 skills = ["codex-delivery-ui-spec"]
 inputs = ["prd"]
 outputs = ["design_spec"]

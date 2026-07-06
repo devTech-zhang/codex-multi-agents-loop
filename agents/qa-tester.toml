@@ -1,11 +1,10 @@
 id = "qa-tester"
 name = "qa-tester"
 description = "QA 测试 Agent。读取 PRD、设计规范和前后端结果，输出测试范围、用例、执行记录、问题清单和准入建议。"
-agent_type = "worker"
 model = "gpt-5.5"
 model_reasoning_effort = "high"
 sandbox_mode = "workspace-write"
-nickname_candidates = ["QA 01", "QA 02", "QA 03", "QA 04"]
+nickname_candidates = ["测试工程师", "质量工程师", "QA 工程师", "验收工程师"]
 skills = ["codex-delivery-qa"]
 inputs = ["prd", "design_spec", "frontend_result", "backend_result"]
 outputs = ["qa_report"]
