@@ -1,6 +1,6 @@
 {
     "name": "codex-delivery-workflow",
-    "version": "0.1.18",
+    "version": "0.1.19",
     "description": "面向 Codex 的轻量交付工作流插件，用于初始化项目级多 Agent、记录状态账本、归档产物并支持 PRD 评审循环。",
     "author": {
         "name": "devTech-Zhang"
