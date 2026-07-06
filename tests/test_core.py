@@ -176,12 +176,12 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         skill = (ROOT / "skills" / PLUGIN_NAME / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertEqual(plugin["name"], PLUGIN_NAME)
-        self.assertEqual(plugin["version"], "0.1.20")
+        self.assertEqual(plugin["version"], "0.1.21")
         self.assertEqual(pyproject["project"]["version"], plugin["version"])
         self.assertEqual(__version__, plugin["version"])
         self.assertEqual(pyproject["project"]["name"], PLUGIN_NAME)
         self.assertEqual(marketplace["plugins"][0]["name"], PLUGIN_NAME)
-        self.assertEqual(plugin["mcpServers"], "./.codex-plugin/mcp.json")
+        self.assertEqual(plugin["mcpServers"], "./.mcp.json")
         self.assertIn("Codex 交付工作流", plugin["interface"]["displayName"])
         self.assertTrue(_has_cjk(plugin["description"]))
         self.assertTrue(_has_cjk(plugin["interface"]["shortDescription"]))
@@ -200,13 +200,16 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         plugin = json.loads((ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8"))
         mcp_path = ROOT / plugin["mcpServers"]
         mcp = json.loads(mcp_path.read_text(encoding="utf-8"))
-        args = mcp["mcpServers"][PLUGIN_NAME]["args"]
+        server = mcp["mcpServers"][PLUGIN_NAME]
 
-        self.assertFalse((ROOT / ".mcp.json").exists())
-        self.assertEqual(mcp_path, ROOT / ".codex-plugin" / "mcp.json")
-        self.assertIn("scripts/codex-deliveryflow-mcp", args[-1])
-        self.assertIn("$CODEX_PLUGIN_ROOT", args[-1])
-        self.assertNotIn("${CODEX_PLUGIN_ROOT", args[-1])
+        self.assertTrue((ROOT / ".mcp.json").exists())
+        self.assertFalse((ROOT / ".codex-plugin" / "mcp.json").exists())
+        self.assertEqual(plugin["mcpServers"], "./.mcp.json")
+        self.assertEqual(mcp_path, ROOT / ".mcp.json")
+        self.assertEqual(server["command"], "./scripts/codex-deliveryflow-mcp")
+        self.assertEqual(server["cwd"], ".")
+        self.assertNotIn("args", server)
+        self.assertNotIn("CODEX_PLUGIN_ROOT", json.dumps(mcp))
 
     def test_init_materializes_project_agents_and_memory(self) -> None:
         initialized = initialize_project_workspace(overwrite_config=True, overwrite_agents=True)

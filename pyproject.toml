@@ -1,6 +1,6 @@
 [project]
 name = "codex-delivery-workflow"
-version = "0.1.20"
+version = "0.1.21"
 description = "面向 Codex 的轻量交付工作流插件"
 requires-python = ">=3.11"
 dependencies = []

@@ -1,0 +1,8 @@
+{
+    "mcpServers": {
+        "codex-delivery-workflow": {
+            "command": "./scripts/codex-deliveryflow-mcp",
+            "cwd": "."
+        }
+    }
+}
