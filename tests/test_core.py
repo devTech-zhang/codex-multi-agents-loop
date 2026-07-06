@@ -66,6 +66,10 @@ def _has_cjk(text: str) -> bool:
     return any("\u4e00" <= char <= "\u9fff" for char in text)
 
 
+def _is_ascii_nickname(text: str) -> bool:
+    return bool(text) and text.isascii()
+
+
 class CodexDeliveryWorkflowTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -126,7 +130,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             self.assertEqual(profile["model_reasoning_effort"], EXPECTED_AGENT_REASONING[agent])
             self.assertEqual(profile["sandbox_mode"], "workspace-write")
             self.assertGreaterEqual(len(profile["nickname_candidates"]), 3)
-            self.assertTrue(all(_has_cjk(nickname) for nickname in profile["nickname_candidates"]))
+            self.assertTrue(all(_is_ascii_nickname(nickname) for nickname in profile["nickname_candidates"]))
             self.assertFalse(any(any(char.isdigit() for char in nickname) for nickname in profile["nickname_candidates"]))
             self.assertEqual(profile["skills"], EXPECTED_AGENT_SKILLS[agent])
             self.assertGreater(len(profile["developer_instructions"]), 800)
@@ -215,6 +219,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
             self.assertEqual(role["config_file"], f"agents/{agent}.toml")
             self.assertTrue(_has_cjk(role["description"]))
             self.assertGreaterEqual(len(role["nickname_candidates"]), 3)
+            self.assertTrue(all(_is_ascii_nickname(nickname) for nickname in role["nickname_candidates"]))
 
     def test_init_merges_existing_codex_config_without_overwriting_other_settings(self) -> None:
         codex_dir = Path(".codex")
@@ -236,6 +241,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
                     "",
                     '[agents."product-manager"]',
                     'description = "保留产品经理自定义描述"',
+                    'nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]',
                     "",
                 ]
             ),
@@ -256,7 +262,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertEqual(codex_config["agents"]["existing-reviewer"]["config_file"], "agents/existing-reviewer.toml")
         self.assertEqual(codex_config["agents"]["product-manager"]["description"], "保留产品经理自定义描述")
         self.assertEqual(codex_config["agents"]["product-manager"]["config_file"], "agents/product-manager.toml")
-        self.assertIn('nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]', text)
+        self.assertIn('nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]', text)
         self.assertIn('[agents."delivery-manager"]', text)
 
     def test_existing_project_agent_removes_legacy_agent_type_without_overwriting_other_content(self) -> None:
@@ -275,7 +281,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         migrated = target.read_text(encoding="utf-8")
         self.assertNotIn("agent_type", migrated)
         self.assertIn("保留项目自定义描述", migrated)
-        self.assertIn('nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]', migrated)
+        self.assertIn('nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]', migrated)
         self.assertEqual(next(item["status"] for item in result if item["agent"] == "product-manager"), "migrated")
 
     def test_no_claude_code_config_or_old_codex_workflow_name_remains(self) -> None:

@@ -43,9 +43,12 @@ workflow.config.json
 [agents."product-manager"]
 config_file = "agents/product-manager.toml"
 description = "产品经理 Agent。负责把用户原始需求转成可交付 PRD，明确目标、范围、流程、验收标准、依赖和风险。"
+nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]
 ```
 
 `config_file` 路径相对 `.codex/config.toml`。这层注册让 `spawn_agent(agent_type="product-manager")` 稳定命中同名自定义 Agent；`@product-manager` 仍然按 `.codex/agents/product-manager.toml` 的 `name` 命中。
+
+`description`、`developer_instructions` 可以使用中文；`nickname_candidates` 必须使用英文 ASCII。发现中文 nickname 时，重新执行 init 让插件迁移 `.codex/agents/*.toml` 和 `.codex/config.toml`。
 
 ## 新需求主流程
 

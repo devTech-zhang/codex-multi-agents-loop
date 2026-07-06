@@ -20,12 +20,30 @@ CHILD_AGENT_IDS = ["product-manager", "ui-designer", "frontend-impl", "backend-i
 PROJECT_AGENT_IDS = [MANAGER_AGENT_ID, *CHILD_AGENT_IDS]
 
 LEGACY_NICKNAME_CANDIDATES = {
-    "delivery-manager": ["主管", "Manager", "交付主管", "Delivery Manager"],
-    "product-manager": ["PM 01", "PM 02", "PM 03", "PM 04"],
-    "ui-designer": ["UI 01", "UI 02", "UI 03", "UI 04"],
-    "frontend-impl": ["FE 01", "FE 02", "FE 03", "FE 04"],
-    "backend-impl": ["BE 01", "BE 02", "BE 03", "BE 04"],
-    "qa-tester": ["QA 01", "QA 02", "QA 03", "QA 04"],
+    "delivery-manager": [
+        ["主管", "Manager", "交付主管", "Delivery Manager"],
+        ["交付主管", "项目主管", "交付经理", "研发协调"],
+    ],
+    "product-manager": [
+        ["PM 01", "PM 02", "PM 03", "PM 04"],
+        ["产品经理", "需求经理", "产品负责人", "产品策划"],
+    ],
+    "ui-designer": [
+        ["UI 01", "UI 02", "UI 03", "UI 04"],
+        ["UI 设计师", "交互设计师", "产品设计师", "视觉设计师"],
+    ],
+    "frontend-impl": [
+        ["FE 01", "FE 02", "FE 03", "FE 04"],
+        ["前端工程师", "前端开发", "Web 工程师", "界面工程师"],
+    ],
+    "backend-impl": [
+        ["BE 01", "BE 02", "BE 03", "BE 04"],
+        ["后端工程师", "服务端开发", "接口工程师", "数据工程师"],
+    ],
+    "qa-tester": [
+        ["QA 01", "QA 02", "QA 03", "QA 04"],
+        ["测试工程师", "质量工程师", "QA 工程师", "验收工程师"],
+    ],
 }
 
 DEFAULT_CONFIG_TEMPLATE: dict[str, Any] = {
@@ -145,7 +163,14 @@ def materialize_project_codex_config() -> dict[str, Any]:
         table = f'agents."{agent_id}"'
         updated = _ensure_toml_key(updated, table, "description", values["description"], replace=False)
         updated = _ensure_toml_key(updated, table, "config_file", values["config_file"], replace=True)
-        updated = _ensure_toml_key(updated, table, "nickname_candidates", values["nickname_candidates"], replace=False)
+        replace_nicknames = _should_replace_config_nicknames(updated, agent_id)
+        updated = _ensure_toml_key(
+            updated,
+            table,
+            "nickname_candidates",
+            values["nickname_candidates"],
+            replace=replace_nicknames,
+        )
 
     if updated != original:
         target.write_text(updated, encoding="utf-8")
@@ -238,7 +263,7 @@ def _manager_profile() -> dict[str, Any]:
         "model": "gpt-5.5",
         "model_reasoning_effort": "medium",
         "sandbox_mode": "workspace-write",
-        "nickname_candidates": ["交付主管", "项目主管", "交付经理", "研发协调"],
+        "nickname_candidates": ["Delivery Manager", "Project Manager", "Delivery Lead", "Workflow Lead"],
         "developer_instructions": """
 你是 delivery-manager，当前项目的交付主管 Agent。
 
@@ -316,7 +341,7 @@ def _migrate_existing_project_agent(content: str, agent_id: str) -> str:
         existing = tomllib.loads(migrated)
     except tomllib.TOMLDecodeError:
         return migrated
-    if existing.get("nickname_candidates") != LEGACY_NICKNAME_CANDIDATES.get(agent_id):
+    if not _should_replace_nicknames(agent_id, existing.get("nickname_candidates")):
         return migrated
     profile = _manager_profile() if agent_id == MANAGER_AGENT_ID else _load_template_agent(agent_id)
     nicknames = profile.get("nickname_candidates", [])
@@ -329,6 +354,29 @@ def _migrate_existing_project_agent(content: str, agent_id: str) -> str:
         else:
             lines.append(line)
     return "".join(lines)
+
+
+def _should_replace_config_nicknames(content: str, agent_id: str) -> bool:
+    try:
+        existing = tomllib.loads(content)
+    except tomllib.TOMLDecodeError:
+        return False
+    agents = existing.get("agents")
+    if not isinstance(agents, dict):
+        return False
+    role = agents.get(agent_id)
+    if not isinstance(role, dict):
+        return False
+    return _should_replace_nicknames(agent_id, role.get("nickname_candidates"))
+
+
+def _should_replace_nicknames(agent_id: str, nicknames: Any) -> bool:
+    if not isinstance(nicknames, list):
+        return False
+    normalized = [str(item) for item in nicknames]
+    if any(not item.isascii() for item in normalized):
+        return True
+    return normalized in LEGACY_NICKNAME_CANDIDATES.get(agent_id, [])
 
 
 def _dump_toml(values: dict[str, Any]) -> str:

@@ -74,14 +74,16 @@ max_depth = 1
 [agents."product-manager"]
 description = "产品经理 Agent。负责把用户原始需求转成可交付 PRD，明确目标、范围、流程、验收标准、依赖和风险。"
 config_file = "agents/product-manager.toml"
-nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]
+nickname_candidates = ["Product Manager", "Requirements Lead", "Product Owner", "PRD Owner"]
 ```
 
 `config_file` 路径相对 `.codex/config.toml`，所以写 `agents/product-manager.toml`。这层配置用于让 Codex 的 `spawn_agent` role registry 稳定识别 `product-manager` 等自定义 Agent；`.codex/agents/*.toml` 里的 `name` 仍然是该 Agent 的真实身份。TOML 不设置 `agent_type`。
 
+`description` 和 `developer_instructions` 保持中文，便于 Agent 理解和输出；`nickname_candidates` 必须使用英文 ASCII，中文昵称会导致 Codex Agent 加载或注册异常。
+
 初始化后要信任当前项目，并完全重启或新开 Codex 会话，新的 `@` 菜单和 `spawn_agent(agent_type="product-manager")` 类型注册才会刷新。
 
-已有项目再次执行 init 时，会自动移除旧版生成的 `agent_type = "worker"` 或 `explorer`，并更新旧版默认昵称；项目自行修改的 Agent 描述和昵称不会被覆盖。已有 `.codex/config.toml` 也不会整文件覆盖，只会写入/校正 `features.multi_agent`，在缺失时补 `agents.max_threads`、`agents.max_depth`，并补齐各 workflow Agent 的 `config_file`、`description`、`nickname_candidates` 注册项；已有的 model、features、其他 Agent、已有 `max_threads` 和同名 Agent 的自定义 description 会保留。
+已有项目再次执行 init 时，会自动移除旧版生成的 `agent_type = "worker"` 或 `explorer`，并把旧版默认昵称或中文昵称迁移为英文；项目自行修改的英文 Agent 昵称不会被覆盖。已有 `.codex/config.toml` 也不会整文件覆盖，只会写入/校正 `features.multi_agent`，在缺失时补 `agents.max_threads`、`agents.max_depth`，并补齐各 workflow Agent 的 `config_file`、`description`、`nickname_candidates` 注册项；已有的 model、features、其他 Agent、已有 `max_threads`、同名 Agent 的自定义 description 和英文 nickname 会保留。
 
 `workflow/codex-delivery-workflow.toml` 中每个步骤的中文 `name` 只是展示名，例如“产品需求整理 V1”；真正关联 Agent 的字段是 `agent = "product-manager"`。中文展示名不会影响 `@product-manager` 或 `spawn_agent(agent_type="product-manager")` 的调度。
 
