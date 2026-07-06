@@ -49,15 +49,15 @@
 
 ## Agent 团队
 
-| 角色 | 身份 | 主要职责 |
-| --- | --- | --- |
-| 老板 | 用户 | 提出目标、直接点名 Agent、确认 PRD、决定是否继续评审 |
-| 主管 | `delivery-manager` | 创建 run、调度员工、读取状态、归纳产物、暴露阻塞点 |
-| 产品经理 | `product-manager` | 把原始需求整理成可设计、可开发、可测试的 PRD |
-| UI 设计师 | `ui-designer` | 输出页面结构、布局、组件、状态和交互规范 |
-| 前端工程师 | `frontend-impl` | 完成前端实现、状态处理、联调点和自测说明 |
-| 后端工程师 | `backend-impl` | 完成接口、领域模型、数据结构、权限和错误处理 |
-| QA 工程师 | `qa-tester` | 生成并执行测试范围、用例、问题清单和准入建议 |
+| 角色       | 身份               | 主要职责                                             |
+| ---------- | ------------------ | ---------------------------------------------------- |
+| 老板       | 用户               | 提出目标、直接点名 Agent、确认 PRD、决定是否继续评审 |
+| 主管       | `delivery-manager` | 创建 run、调度员工、读取状态、归纳产物、暴露阻塞点   |
+| 产品经理   | `product-manager`  | 把原始需求整理成可设计、可开发、可测试的 PRD         |
+| UI 设计师  | `ui-designer`      | 输出页面结构、布局、组件、状态和交互规范             |
+| 前端工程师 | `frontend-impl`    | 完成前端实现、状态处理、联调点和自测说明             |
+| 后端工程师 | `backend-impl`     | 完成接口、领域模型、数据结构、权限和错误处理         |
+| QA 工程师  | `qa-tester`        | 生成并执行测试范围、用例、问题清单和准入建议         |
 
 ## 快速开始
 
@@ -154,30 +154,30 @@ docs/
 workflow.config.json
 ```
 
-| 存储 | 保存内容 | 设计目的 |
-| --- | --- | --- |
-| `workflow.sqlite3` | project、run、job、step、artifact、review、event、memory 索引 | 稳定流转、并发领取、跨会话恢复 |
-| `memory/<agent>.md` | 角色结论、产物路径、未决问题、下一步 | 让同名 Agent 实例共享长期上下文 |
-| `docs/delivery/` | PRD、设计规范、实现结果、QA 报告 | 保存完整、可版本化、可审阅的交付物 |
+| 存储                | 保存内容                                                      | 设计目的                           |
+| ------------------- | ------------------------------------------------------------- | ---------------------------------- |
+| `workflow.sqlite3`  | project、run、job、step、artifact、review、event、memory 索引 | 稳定流转、并发领取、跨会话恢复     |
+| `memory/<agent>.md` | 角色结论、产物路径、未决问题、下一步                          | 让同名 Agent 实例共享长期上下文    |
+| `docs/delivery/`    | PRD、设计规范、实现结果、QA 报告                              | 保存完整、可版本化、可审阅的交付物 |
 
 > [!NOTE]
 > `description` 和 `developer_instructions` 可以使用中文；`nickname_candidates` 必须使用英文 ASCII，否则 Codex 可能无法加载或注册 Agent。
 
 ## MCP 工具
 
-| 意图 | 工具 |
-| --- | --- |
-| 初始化项目 | `codex_delivery_workflow_init_project` |
-| 创建大任务 | `codex_delivery_workflow_create` |
-| 查询状态 | `codex_delivery_workflow_status` |
-| 准备 Agent 任务包 | `codex_delivery_workflow_prepare_handoff` |
-| 领取待办 | `codex_delivery_workflow_dispatch_next` |
-| 回填产物 | `codex_delivery_workflow_complete_agent_step` |
-| 主管汇总 | `codex_delivery_workflow_manager_summary` |
-| 确认 PRD | `codex_delivery_workflow_confirm_prd` |
-| 发起多 Agent 评审 | `codex_delivery_workflow_request_prd_review` |
-| 列出或读取产物 | `codex_delivery_workflow_list_artifacts` / `codex_delivery_workflow_read_artifact` |
-| 查看工作流定义 | `codex_delivery_workflow_inspect` |
+| 意图              | 工具                                                                               |
+| ----------------- | ---------------------------------------------------------------------------------- |
+| 初始化项目        | `codex_delivery_workflow_init_project`                                             |
+| 创建大任务        | `codex_delivery_workflow_create`                                                   |
+| 查询状态          | `codex_delivery_workflow_status`                                                   |
+| 准备 Agent 任务包 | `codex_delivery_workflow_prepare_handoff`                                          |
+| 领取待办          | `codex_delivery_workflow_dispatch_next`                                            |
+| 回填产物          | `codex_delivery_workflow_complete_agent_step`                                      |
+| 主管汇总          | `codex_delivery_workflow_manager_summary`                                          |
+| 确认 PRD          | `codex_delivery_workflow_confirm_prd`                                              |
+| 发起多 Agent 评审 | `codex_delivery_workflow_request_prd_review`                                       |
+| 列出或读取产物    | `codex_delivery_workflow_list_artifacts` / `codex_delivery_workflow_read_artifact` |
+| 查看工作流定义    | `codex_delivery_workflow_inspect`                                                  |
 
 MCP 工具支持显式传入 `project_root`，因此即使 Server 从插件缓存目录启动，也会把状态和产物写入当前 Codex 项目，而不是插件目录。
 
@@ -201,4 +201,4 @@ git diff --check
 
 ## 当前范围
 
-当前版本专注验证 Codex 内的轻量多 Agent 交付闭环：项目级 Agent、主管调度、PRD 评审、薄状态账本、共享记忆和文件产物。暂不包含飞书、外部审批、跨平台适配、复杂发布流水线和无人值守的全自动上线。
+当前版本专注验证 Codex 内的轻量多 Agent 交付闭环：项目级 Agent、主管调度、PRD 评审、薄状态账本、共享记忆和文件产物。

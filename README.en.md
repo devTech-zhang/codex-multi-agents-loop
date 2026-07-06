@@ -49,15 +49,15 @@ Multi-agent chats often lose state across sessions. Managers may overstep and wr
 
 ## The agent team
 
-| Role | Identity | Primary responsibility |
-| --- | --- | --- |
-| Owner | User | Set goals, call agents directly, approve the PRD, and decide whether to continue reviews |
-| Manager | `delivery-manager` | Create runs, dispatch specialists, read state, summarize artifacts, and surface blockers |
-| Product Manager | `product-manager` | Turn raw requirements into a PRD that can be designed, built, and tested |
-| UI Designer | `ui-designer` | Define page structure, layout, components, states, and interaction behavior |
-| Frontend Engineer | `frontend-impl` | Implement the frontend, state handling, integration points, and self-checks |
-| Backend Engineer | `backend-impl` | Implement APIs, domain models, data structures, permissions, and error handling |
-| QA Engineer | `qa-tester` | Define and execute test scope, cases, issue lists, and release recommendations |
+| Role              | Identity           | Primary responsibility                                                                   |
+| ----------------- | ------------------ | ---------------------------------------------------------------------------------------- |
+| Owner             | User               | Set goals, call agents directly, approve the PRD, and decide whether to continue reviews |
+| Manager           | `delivery-manager` | Create runs, dispatch specialists, read state, summarize artifacts, and surface blockers |
+| Product Manager   | `product-manager`  | Turn raw requirements into a PRD that can be designed, built, and tested                 |
+| UI Designer       | `ui-designer`      | Define page structure, layout, components, states, and interaction behavior              |
+| Frontend Engineer | `frontend-impl`    | Implement the frontend, state handling, integration points, and self-checks              |
+| Backend Engineer  | `backend-impl`     | Implement APIs, domain models, data structures, permissions, and error handling          |
+| QA Engineer       | `qa-tester`        | Define and execute test scope, cases, issue lists, and release recommendations           |
 
 ## Quick start
 
@@ -154,30 +154,30 @@ docs/
 workflow.config.json
 ```
 
-| Storage | Contents | Purpose |
-| --- | --- | --- |
-| `workflow.sqlite3` | Project, run, job, step, artifact, review, event, and memory indexes | Reliable transitions, atomic claims, and cross-session recovery |
-| `memory/<agent>.md` | Role conclusions, artifact paths, open questions, and next actions | Shared long-term context for instances with the same agent name |
-| `docs/delivery/` | PRDs, design specs, implementation results, and QA reports | Complete, versioned, reviewable deliverables |
+| Storage             | Contents                                                             | Purpose                                                         |
+| ------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `workflow.sqlite3`  | Project, run, job, step, artifact, review, event, and memory indexes | Reliable transitions, atomic claims, and cross-session recovery |
+| `memory/<agent>.md` | Role conclusions, artifact paths, open questions, and next actions   | Shared long-term context for instances with the same agent name |
+| `docs/delivery/`    | PRDs, design specs, implementation results, and QA reports           | Complete, versioned, reviewable deliverables                    |
 
 > [!NOTE]
 > `description` and `developer_instructions` may be written in Chinese, but `nickname_candidates` must use English ASCII. Non-ASCII nicknames may prevent Codex from loading or registering an agent.
 
 ## MCP tools
 
-| Intent | Tool |
-| --- | --- |
-| Initialize a project | `codex_delivery_workflow_init_project` |
-| Create a delivery run | `codex_delivery_workflow_create` |
-| Read workflow state | `codex_delivery_workflow_status` |
-| Prepare an agent task package | `codex_delivery_workflow_prepare_handoff` |
-| Claim a pending job | `codex_delivery_workflow_dispatch_next` |
-| Record an artifact and advance | `codex_delivery_workflow_complete_agent_step` |
-| Summarize as the manager | `codex_delivery_workflow_manager_summary` |
-| Approve the PRD | `codex_delivery_workflow_confirm_prd` |
-| Start a multi-agent PRD review | `codex_delivery_workflow_request_prd_review` |
-| List or read artifacts | `codex_delivery_workflow_list_artifacts` / `codex_delivery_workflow_read_artifact` |
-| Inspect the workflow definition | `codex_delivery_workflow_inspect` |
+| Intent                          | Tool                                                                               |
+| ------------------------------- | ---------------------------------------------------------------------------------- |
+| Initialize a project            | `codex_delivery_workflow_init_project`                                             |
+| Create a delivery run           | `codex_delivery_workflow_create`                                                   |
+| Read workflow state             | `codex_delivery_workflow_status`                                                   |
+| Prepare an agent task package   | `codex_delivery_workflow_prepare_handoff`                                          |
+| Claim a pending job             | `codex_delivery_workflow_dispatch_next`                                            |
+| Record an artifact and advance  | `codex_delivery_workflow_complete_agent_step`                                      |
+| Summarize as the manager        | `codex_delivery_workflow_manager_summary`                                          |
+| Approve the PRD                 | `codex_delivery_workflow_confirm_prd`                                              |
+| Start a multi-agent PRD review  | `codex_delivery_workflow_request_prd_review`                                       |
+| List or read artifacts          | `codex_delivery_workflow_list_artifacts` / `codex_delivery_workflow_read_artifact` |
+| Inspect the workflow definition | `codex_delivery_workflow_inspect`                                                  |
 
 MCP tools accept an explicit `project_root`, so even when the server starts from the plugin cache, state and artifacts are written to the active Codex project rather than the plugin directory.
 
@@ -201,4 +201,4 @@ git diff --check
 
 ## Current scope
 
-The current release focuses on a lightweight Codex-native delivery loop: project agents, manager-led dispatch, PRD review, a thin state ledger, shared role memory, and file-based artifacts. It intentionally excludes Feishu, external approvals, cross-platform adapters, complex release pipelines, and unattended production deployment.
+The current release focuses on a lightweight Codex-native delivery loop: project agents, manager-led dispatch, PRD review, a thin state ledger, shared role memory, and file-based artifacts.
