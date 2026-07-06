@@ -133,11 +133,13 @@ def _handle(message: dict[str, Any]) -> dict[str, Any] | None:
     msg_id = message.get("id")
     try:
         if method == "initialize":
+            params = message.get("params") or {}
+            protocol_version = params.get("protocolVersion") if isinstance(params.get("protocolVersion"), str) else "2024-11-05"
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": protocol_version,
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "codex-delivery-workflow", "version": __version__},
                 },
@@ -240,14 +242,13 @@ def _read_message() -> dict[str, Any] | None:
 
 
 def _write_message(message: dict[str, Any]) -> None:
-    body = json.dumps(message, ensure_ascii=False).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
+    body = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
     stream = getattr(sys.stdout, "buffer", None)
     if stream is None:
-        sys.stdout.write((header + body).decode("utf-8"))
+        sys.stdout.write(body + "\n")
         sys.stdout.flush()
         return
-    stream.write(header + body)
+    stream.write((body + "\n").encode("utf-8"))
     stream.flush()
 
 

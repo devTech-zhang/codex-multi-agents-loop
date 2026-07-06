@@ -77,12 +77,10 @@ def _mcp_frame(message: dict) -> bytes:
     return f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body
 
 
-def _read_mcp_frame(data: bytes) -> dict:
-    header, body = data.split(b"\r\n\r\n", 1)
-    length = int(
-        next(line.split(b":", 1)[1].strip() for line in header.splitlines() if line.lower().startswith(b"content-length:"))
-    )
-    return json.loads(body[:length].decode("utf-8"))
+def _read_mcp_json_line(data: bytes) -> dict:
+    lines = data.splitlines()
+    assert len(lines) == 1, data.decode("utf-8", "replace")
+    return json.loads(lines[0].decode("utf-8"))
 
 
 class CodexDeliveryWorkflowTest(unittest.TestCase):
@@ -176,7 +174,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         skill = (ROOT / "skills" / PLUGIN_NAME / "SKILL.md").read_text(encoding="utf-8")
 
         self.assertEqual(plugin["name"], PLUGIN_NAME)
-        self.assertEqual(plugin["version"], "0.1.21")
+        self.assertEqual(plugin["version"], "0.1.22")
         self.assertEqual(pyproject["project"]["version"], plugin["version"])
         self.assertEqual(__version__, plugin["version"])
         self.assertEqual(pyproject["project"]["name"], PLUGIN_NAME)
@@ -575,7 +573,7 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         )
         self.assertFalse(any("lark" in name or "feishu" in name or "bug" in name or "gate" in name for name in tool_names))
 
-    def test_mcp_server_accepts_content_length_framed_initialize(self) -> None:
+    def test_mcp_server_accepts_content_length_input_and_writes_newline_json_response(self) -> None:
         initialize = {
             "jsonrpc": "2.0",
             "id": 1,
@@ -592,10 +590,43 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8"))
-        response = _read_mcp_frame(completed.stdout)
+        self.assertFalse(completed.stdout.startswith(b"Content-Length:"), completed.stdout.decode("utf-8", "replace"))
+        response = _read_mcp_json_line(completed.stdout)
         self.assertEqual(response["id"], 1)
         self.assertEqual(response["result"]["serverInfo"]["name"], PLUGIN_NAME)
         self.assertEqual(response["result"]["protocolVersion"], "2024-11-05")
+
+    def test_mcp_server_supports_codex_stdio_newline_json_session(self) -> None:
+        messages = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "codex", "version": "0.142.5"},
+                },
+            },
+            {"jsonrpc": "2.0", "method": "notifications/initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        ]
+        stdin = "".join(json.dumps(message, ensure_ascii=False, separators=(",", ":")) + "\n" for message in messages).encode("utf-8")
+
+        completed = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "codex-deliveryflow-mcp")],
+            input=stdin,
+            cwd=self.tmp.name,
+            capture_output=True,
+            timeout=3,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode("utf-8"))
+        responses = [json.loads(line) for line in completed.stdout.decode("utf-8").splitlines()]
+        self.assertEqual([response["id"] for response in responses], [1, 2])
+        self.assertEqual(responses[0]["result"]["serverInfo"]["name"], PLUGIN_NAME)
+        self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(responses[1]["result"]["tools"][0]["name"], "codex_delivery_workflow_init")
 
     def test_legacy_worker_platform_and_hook_python_files_are_removed(self) -> None:
         legacy_files = [
