@@ -38,6 +38,7 @@
 
 ```text
 .codex/
+  config.toml
   agents/
     delivery-manager.toml
     product-manager.toml
@@ -60,9 +61,27 @@ docs/
 workflow.config.json
 ```
 
-插件仓库里的 `agents/*.toml` 是项目级 Agent 模板源。init 会把模板写入业务项目的 `.codex/agents/`；TOML 不设置 `agent_type`，Codex 使用 `name` 注册同名自定义类型，例如 `product-manager`。初始化后需要新开或刷新 Codex 会话，新的 `@` 菜单和 `spawn_agent` 类型列表才会生效。
+插件仓库里的 `agents/*.toml` 是项目级 Agent 模板源。init 会把模板写入业务项目的 `.codex/agents/`，同时 merge/create `.codex/config.toml`：
 
-已有项目再次执行 init 时，会自动移除旧版生成的 `agent_type = "worker"` 或 `explorer`，并更新旧版默认昵称；项目自行修改的描述和昵称不会被覆盖。
+```toml
+[features]
+multi_agent = true
+
+[agents]
+max_threads = 6
+max_depth = 1
+
+[agents."product-manager"]
+description = "产品经理 Agent。负责把用户原始需求转成可交付 PRD，明确目标、范围、流程、验收标准、依赖和风险。"
+config_file = "agents/product-manager.toml"
+nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]
+```
+
+`config_file` 路径相对 `.codex/config.toml`，所以写 `agents/product-manager.toml`。这层配置用于让 Codex 的 `spawn_agent` role registry 稳定识别 `product-manager` 等自定义 Agent；`.codex/agents/*.toml` 里的 `name` 仍然是该 Agent 的真实身份。TOML 不设置 `agent_type`。
+
+初始化后要信任当前项目，并完全重启或新开 Codex 会话，新的 `@` 菜单和 `spawn_agent(agent_type="product-manager")` 类型注册才会刷新。
+
+已有项目再次执行 init 时，会自动移除旧版生成的 `agent_type = "worker"` 或 `explorer`，并更新旧版默认昵称；项目自行修改的 Agent 描述和昵称不会被覆盖。已有 `.codex/config.toml` 也不会整文件覆盖，只会写入/校正 `features.multi_agent`，在缺失时补 `agents.max_threads`、`agents.max_depth`，并补齐各 workflow Agent 的 `config_file`、`description`、`nickname_candidates` 注册项；已有的 model、features、其他 Agent、已有 `max_threads` 和同名 Agent 的自定义 description 会保留。
 
 `workflow/codex-delivery-workflow.toml` 中每个步骤的中文 `name` 只是展示名，例如“产品需求整理 V1”；真正关联 Agent 的字段是 `agent = "product-manager"`。中文展示名不会影响 `@product-manager` 或 `spawn_agent(agent_type="product-manager")` 的调度。
 

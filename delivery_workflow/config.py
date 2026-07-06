@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,7 @@ PLUGIN_CONFIG_NAME = "codex-delivery-workflow.config.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 PLUGIN_ROOT = PACKAGE_ROOT.parent
 PROJECT_CODEX_DIR = ".codex"
+PROJECT_CODEX_CONFIG = ".codex/config.toml"
 PROJECT_AGENT_DIR = ".codex/agents"
 PROJECT_WORKFLOW_DIR = ".codex/delivery-workflow"
 PROJECT_MEMORY_DIR = ".codex/delivery-workflow/memory"
@@ -87,9 +89,12 @@ def initialize_project_workspace(*, overwrite_config: bool = False, overwrite_ag
 
     db = init_db()
     agents = materialize_project_agents(overwrite=overwrite_agents)
+    codex_config = materialize_project_codex_config()
     memories = initialize_agent_memory_files(overwrite=False)
     result = {
         "config_path": str(config_path),
+        "codex_config_path": PROJECT_CODEX_CONFIG,
+        "codex_config": codex_config,
         "db_path": str(db),
         "home": str(db.parent),
         "logs": str(log_root()),
@@ -123,6 +128,38 @@ def materialize_project_agents(*, overwrite: bool = False) -> list[dict[str, Any
         target.write_text(_project_agent_toml(agent_id), encoding="utf-8")
         written.append({"agent": agent_id, "path": str(target), "status": "written"})
     return written
+
+
+def materialize_project_codex_config() -> dict[str, Any]:
+    target = Path.cwd() / PROJECT_CODEX_CONFIG
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    original = target.read_text(encoding="utf-8") if existed else ""
+
+    updated = original
+    updated = _ensure_toml_key(updated, "features", "multi_agent", True, replace=True)
+    updated = _ensure_toml_key(updated, "agents", "max_threads", 6, replace=False)
+    updated = _ensure_toml_key(updated, "agents", "max_depth", 1, replace=False)
+
+    for agent_id, values in _project_agent_config_entries().items():
+        table = f'agents."{agent_id}"'
+        updated = _ensure_toml_key(updated, table, "description", values["description"], replace=False)
+        updated = _ensure_toml_key(updated, table, "config_file", values["config_file"], replace=True)
+        updated = _ensure_toml_key(updated, table, "nickname_candidates", values["nickname_candidates"], replace=False)
+
+    if updated != original:
+        target.write_text(updated, encoding="utf-8")
+        status = "merged" if existed else "written"
+    else:
+        status = "exists"
+
+    return {
+        "path": str(target),
+        "status": status,
+        "agents": PROJECT_AGENT_IDS,
+        "restart_required": True,
+        "note": "项目级 Agent 注册层已写入 .codex/config.toml；需要重启或新开 Codex 会话后 spawn_agent 类型注册才会刷新。",
+    }
 
 
 def initialize_agent_memory_files(*, overwrite: bool = False) -> list[dict[str, Any]]:
@@ -253,6 +290,18 @@ def _project_agent_instructions(agent_id: str, profile: dict[str, Any]) -> str:
 """
 
 
+def _project_agent_config_entries() -> dict[str, dict[str, Any]]:
+    entries: dict[str, dict[str, Any]] = {}
+    for agent_id in PROJECT_AGENT_IDS:
+        profile = _manager_profile() if agent_id == MANAGER_AGENT_ID else _load_template_agent(agent_id)
+        entries[agent_id] = {
+            "description": profile["description"],
+            "config_file": f"agents/{agent_id}.toml",
+            "nickname_candidates": profile.get("nickname_candidates", []),
+        }
+    return entries
+
+
 def _remove_legacy_agent_type(content: str) -> str:
     return "".join(
         line
@@ -293,3 +342,61 @@ def _dump_toml(values: dict[str, Any]) -> str:
         else:
             lines.append(f"{key} = {json.dumps(value, ensure_ascii=False)}")
     return "\n".join(lines) + "\n"
+
+
+_TOML_TABLE_RE = re.compile(r"^\s*(\[\[?)([^\]]+)\]\]?\s*(?:#.*)?$")
+
+
+def _ensure_toml_key(text: str, table: str, key: str, value: Any, *, replace: bool) -> str:
+    if text and not text.endswith("\n"):
+        text += "\n"
+    lines = text.splitlines(keepends=True)
+    literal = _toml_literal(value)
+    target_line = f"{key} = {literal}\n"
+    start, end = _find_toml_table(lines, table)
+
+    if start is None:
+        prefix = "" if not lines else "\n"
+        return "".join(lines) + f"{prefix}[{table}]\n{target_line}"
+
+    key_re = re.compile(rf"^(\s*){re.escape(key)}\s*=")
+    for index in range(start + 1, end):
+        match = key_re.match(lines[index])
+        if not match:
+            continue
+        if not replace:
+            return "".join(lines)
+        newline = "\n" if lines[index].endswith("\n") else ""
+        lines[index] = f"{match.group(1)}{key} = {literal}{newline}"
+        return "".join(lines)
+
+    lines.insert(end, target_line)
+    return "".join(lines)
+
+
+def _find_toml_table(lines: list[str], table: str) -> tuple[int | None, int]:
+    for index, line in enumerate(lines):
+        match = _TOML_TABLE_RE.match(line)
+        if not match:
+            continue
+        if match.group(1) != "[":
+            continue
+        if match.group(2).strip() != table:
+            continue
+        end = len(lines)
+        for next_index in range(index + 1, len(lines)):
+            if _TOML_TABLE_RE.match(lines[next_index]):
+                end = next_index
+                break
+        return index, end
+    return None, len(lines)
+
+
+def _toml_literal(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_literal(item) for item in value) + "]"
+    return json.dumps(str(value), ensure_ascii=False)

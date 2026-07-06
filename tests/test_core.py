@@ -11,6 +11,7 @@ from pathlib import Path
 from delivery_workflow import engine
 from delivery_workflow.config import (
     DEFAULT_CONFIG_TEMPLATE,
+    PROJECT_CODEX_CONFIG,
     WORKSPACE_CONFIG_NAME,
     initialize_project_workspace,
     load_config,
@@ -189,10 +190,12 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         initialized = initialize_project_workspace(overwrite_config=True, overwrite_agents=True)
 
         self.assertEqual(Path(initialized["agent_dir"]).name, "agents")
+        self.assertEqual(Path(initialized["codex_config_path"]), Path(PROJECT_CODEX_CONFIG))
         self.assertEqual({item["agent"] for item in initialized["agents"]}, set(PROJECT_AGENTS))
         self.assertEqual({item["agent"] for item in initialized["memories"]}, set(PROJECT_AGENTS))
         self.assertTrue((Path(".codex") / "agents" / "delivery-manager.toml").exists())
         self.assertTrue((Path(".codex") / "agents" / "product-manager.toml").exists())
+        self.assertTrue(Path(PROJECT_CODEX_CONFIG).exists())
         self.assertTrue((Path(".codex") / "delivery-workflow" / "memory" / "delivery-manager.md").exists())
         project_agent = tomllib.loads((Path(".codex") / "agents" / "product-manager.toml").read_text(encoding="utf-8"))
         self.assertEqual(project_agent["name"], "product-manager")
@@ -202,6 +205,59 @@ class CodexDeliveryWorkflowTest(unittest.TestCase):
         self.assertIn('spawn_agent(agent_type="product-manager"', project_agent["developer_instructions"])
         manager_agent = tomllib.loads((Path(".codex") / "agents" / "delivery-manager.toml").read_text(encoding="utf-8"))
         self.assertNotIn('spawn_agent(agent_type="delivery-manager"', manager_agent["developer_instructions"])
+
+        codex_config = tomllib.loads(Path(PROJECT_CODEX_CONFIG).read_text(encoding="utf-8"))
+        self.assertTrue(codex_config["features"]["multi_agent"])
+        self.assertEqual(codex_config["agents"]["max_threads"], 6)
+        self.assertEqual(codex_config["agents"]["max_depth"], 1)
+        for agent in PROJECT_AGENTS:
+            role = codex_config["agents"][agent]
+            self.assertEqual(role["config_file"], f"agents/{agent}.toml")
+            self.assertTrue(_has_cjk(role["description"]))
+            self.assertGreaterEqual(len(role["nickname_candidates"]), 3)
+
+    def test_init_merges_existing_codex_config_without_overwriting_other_settings(self) -> None:
+        codex_dir = Path(".codex")
+        codex_dir.mkdir()
+        Path(PROJECT_CODEX_CONFIG).write_text(
+            "\n".join(
+                [
+                    'model = "gpt-5.4"',
+                    "",
+                    "[features]",
+                    "memories = true",
+                    "",
+                    "[agents]",
+                    "max_threads = 3",
+                    "",
+                    '[agents."existing-reviewer"]',
+                    'description = "保留已有评审 Agent"',
+                    'config_file = "agents/existing-reviewer.toml"',
+                    "",
+                    '[agents."product-manager"]',
+                    'description = "保留产品经理自定义描述"',
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        initialized = initialize_project_workspace(overwrite_config=True, overwrite_agents=True)
+
+        self.assertEqual(Path(initialized["codex_config_path"]), Path(PROJECT_CODEX_CONFIG))
+        self.assertEqual(initialized["codex_config"]["status"], "merged")
+        text = Path(PROJECT_CODEX_CONFIG).read_text(encoding="utf-8")
+        codex_config = tomllib.loads(text)
+        self.assertEqual(codex_config["model"], "gpt-5.4")
+        self.assertTrue(codex_config["features"]["memories"])
+        self.assertTrue(codex_config["features"]["multi_agent"])
+        self.assertEqual(codex_config["agents"]["max_threads"], 3)
+        self.assertEqual(codex_config["agents"]["max_depth"], 1)
+        self.assertEqual(codex_config["agents"]["existing-reviewer"]["config_file"], "agents/existing-reviewer.toml")
+        self.assertEqual(codex_config["agents"]["product-manager"]["description"], "保留产品经理自定义描述")
+        self.assertEqual(codex_config["agents"]["product-manager"]["config_file"], "agents/product-manager.toml")
+        self.assertIn('nickname_candidates = ["产品经理", "需求经理", "产品负责人", "产品策划"]', text)
+        self.assertIn('[agents."delivery-manager"]', text)
 
     def test_existing_project_agent_removes_legacy_agent_type_without_overwriting_other_content(self) -> None:
         agent_dir = Path(".codex/agents")

@@ -27,6 +27,7 @@ codex_delivery_workflow_init_project
 该工具会写入：
 
 ```text
+.codex/config.toml
 .codex/agents/
 .codex/delivery-workflow/workflow.sqlite3
 .codex/delivery-workflow/memory/
@@ -34,9 +35,17 @@ docs/delivery/
 workflow.config.json
 ```
 
-初始化后，老板可以在当前项目中通过 `@delivery-manager` 或 `@product-manager` 等方式直接点名角色。如果当前会话的 `@` 菜单没有刷新，提示老板新开或刷新当前 Codex 会话。
+初始化后，老板可以在当前项目中通过 `@delivery-manager` 或 `@product-manager` 等方式直接点名角色。如果当前会话的 `@` 菜单或 `spawn_agent` 类型没有刷新，提示老板信任当前项目，并完全重启或新开 Codex 会话。
 
-项目 Agent TOML 不设置 `agent_type`。Codex 使用 `name` 注册自定义类型，因此 `name = "product-manager"` 同时对应 `@product-manager` 和 `spawn_agent(agent_type="product-manager")`。
+项目 Agent TOML 不设置 `agent_type`。Codex 使用 `.codex/agents/<agent>.toml` 的 `name` 作为 Agent 真实身份，同时 `.codex/config.toml` 会显式声明：
+
+```toml
+[agents."product-manager"]
+config_file = "agents/product-manager.toml"
+description = "产品经理 Agent。负责把用户原始需求转成可交付 PRD，明确目标、范围、流程、验收标准、依赖和风险。"
+```
+
+`config_file` 路径相对 `.codex/config.toml`。这层注册让 `spawn_agent(agent_type="product-manager")` 稳定命中同名自定义 Agent；`@product-manager` 仍然按 `.codex/agents/product-manager.toml` 的 `name` 命中。
 
 ## 新需求主流程
 
