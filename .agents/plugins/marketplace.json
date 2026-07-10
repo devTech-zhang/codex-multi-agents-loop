@@ -5,7 +5,7 @@
     },
     "plugins": [
         {
-            "name": "codex-delivery-workflow",
+            "name": "codex-multi-agents-loop",
             "policy": {
                 "installation": "AVAILABLE",
                 "authentication": "ON_INSTALL"
@@ -13,7 +13,7 @@
             "category": "workflow",
             "source": {
                 "source": "url",
-                "url": "https://github.com/devTech-zhang/multi-agent-delivery-workflow.git",
+                "url": "https://github.com/devTech-zhang/codex-multi-agents-loop.git",
                 "ref": "main"
             }
         }

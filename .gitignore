@@ -1,11 +1,6 @@
-/local
 .DS_Store
 .venv/
+.pytest_cache/
 __pycache__/
 *.pyc
-.claude/settings.local.json
-.delivery-workflow/
-delivery-projects/
-
-# 敏感配置：本地 .env 不提交
 .env

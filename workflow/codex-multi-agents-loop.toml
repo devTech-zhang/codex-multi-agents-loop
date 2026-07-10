@@ -1,0 +1,56 @@
+id = "codex-multi-agents-loop"
+name = "Codex 项目级多 Agent Loop"
+version = "0.0.1"
+
+[[steps]]
+id = "product-manager"
+name = "产品功能与需求交接"
+category = "automated"
+executor = "agent"
+agent = "product-manager"
+artifact_category = "product"
+inputs = ["raw_requirement", "project_context"]
+outputs = ["prd"]
+
+[[steps]]
+id = "software-architect"
+name = "技术架构与任务拆解"
+category = "automated"
+executor = "agent"
+agent = "software-architect"
+artifact_category = "architecture"
+inputs = ["prd", "project_context"]
+outputs = ["architecture_design"]
+next = { default = "ui-designer" }
+
+[[steps]]
+id = "ui-designer"
+name = "UI 设计规范"
+category = "automated"
+executor = "agent"
+agent = "ui-designer"
+artifact_category = "design"
+inputs = ["prd", "architecture_design"]
+outputs = ["design_spec"]
+next = { default = "development-engineer" }
+
+[[steps]]
+id = "development-engineer"
+name = "软件研发实现"
+category = "automated"
+executor = "agent"
+agent = "development-engineer"
+artifact_category = "implementation"
+inputs = ["prd", "architecture_design", "design_spec"]
+outputs = ["development_report"]
+next = { default = "qa-engineer" }
+
+[[steps]]
+id = "qa-engineer"
+name = "QA 验证"
+category = "automated"
+executor = "agent"
+agent = "qa-engineer"
+artifact_category = "qa"
+inputs = ["prd", "architecture_design", "design_spec", "development_report"]
+outputs = ["qa_report"]

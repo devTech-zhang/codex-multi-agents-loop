@@ -1,12 +1,12 @@
 [project]
-name = "codex-delivery-workflow"
-version = "0.1.23"
-description = "面向 Codex 的轻量交付工作流插件"
+name = "codex-multi-agents-loop"
+version = "0.0.1"
+description = "面向 Codex 的项目级多 Agent Loop 插件"
 requires-python = ">=3.11"
 dependencies = []
 
 [project.scripts]
-codex-deliveryflow = "delivery_workflow.cli:main"
+codex-multi-agents-loop = "agents_workflow.cli:main"
 
 [tool.setuptools.package-data]
-delivery_workflow = []
+agents_workflow = []

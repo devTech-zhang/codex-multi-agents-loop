@@ -1,24 +1,24 @@
 {
-    "name": "codex-delivery-workflow",
-    "version": "0.1.23",
-    "description": "面向 Codex 的轻量交付工作流插件，用于初始化项目级多 Agent、记录状态账本、归档产物并支持 PRD 评审循环。",
+    "name": "codex-multi-agents-loop",
+    "version": "0.0.1",
+    "description": "面向 Codex 的项目级多 Agent Loop 插件，用于初始化 PM、产品、架构、UI、研发、测试六类 Agent，记录状态账本、归档产物并支持全局记忆同步。",
     "author": {
         "name": "devTech-Zhang"
     },
-    "keywords": ["workflow", "delivery", "codex", "multi-agent"],
+    "keywords": ["loop", "codex", "multi-agent", "software-engineering", "project"],
     "skills": "./skills/",
-    "repository": "https://github.com/devTech-zhang/multi-agent-delivery-workflow.git",
+    "repository": "https://github.com/devTech-zhang/codex-multi-agents-loop.git",
     "interface": {
-        "displayName": "Codex 交付工作流",
-        "shortDescription": "初始化项目级多 Agent 交付工作台。",
-        "longDescription": "这是一个 Codex 优先的轻量交付工作流插件。它会把主管和五个员工 Agent 写入当前项目的 .codex/agents，用 SQLite 记录状态，用 docs/delivery 归档产物，并支持 PRD V1 老板确认、多 Agent 评审和 V2/V3 循环。",
+        "displayName": "Codex 多 Agent Loop",
+        "shortDescription": "初始化项目级 PM、产品、架构、UI、研发、测试 Agent。",
+        "longDescription": "这是一个 Codex 优先的项目级多 Agent Loop 插件。它会把 project-manager、product-manager、software-architect、ui-designer、development-engineer、qa-engineer 写入当前项目的 .codex/agents，用 SQLite 记录状态，用 .codex/multi-agents-loop/runs 归档运行产物，并支持产品交接确认、多 Agent 评审、闭环评估和全局记忆同步。",
         "developerName": "devTech-Zhang",
         "category": "workflow",
         "capabilities": ["Interactive", "Write", "MCP"],
-        "defaultPrompt": ["初始化 Codex 交付工作流", "查看交付工作流状态", "多 Agent 评审当前 PRD"],
+        "defaultPrompt": ["初始化 Codex 多 Agent Loop", "查看多 Agent Loop 状态", "多 Agent 评审当前产品交接说明"],
         "brandColor": "#2563EB",
-        "logo": "./assets/codex-delivery-workflow-logo.png",
-        "composerIcon": "./assets/codex-delivery-workflow-logo.png"
+        "logo": "./assets/logo.png",
+        "composerIcon": "./assets/logo.png"
     },
     "mcpServers": "./.mcp.json"
 }

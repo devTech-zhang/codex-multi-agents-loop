@@ -1,7 +1,7 @@
 {
     "mcpServers": {
-        "codex-delivery-workflow": {
-            "command": "./scripts/codex-deliveryflow-mcp",
+        "codex-multi-agents-loop": {
+            "command": "./scripts/codex-multi-agents-loop-mcp",
             "cwd": "."
         }
     }

@@ -1,0 +1,11 @@
+{
+  "storage": {
+    "home": ".codex/multi-agents-loop",
+    "db": ".codex/multi-agents-loop/workflow.sqlite3",
+    "artifact_root": ".codex/multi-agents-loop/runs",
+    "scratch_root": ".codex/multi-agents-loop/scratch",
+    "logs": ".codex/multi-agents-loop/logs",
+    "memory_root": ".codex/multi-agents-loop/memory",
+    "global_memory_root": "~/.codex/codex-multi-agents-loop/global-memory"
+  }
+}
